@@ -1,0 +1,9 @@
+name = "dev-build"
+description = "Third-party build scripts and tools: no network, many processes. Add your project folder as read-write."
+extends = "strict"
+
+[devices]
+clipboard = "full"
+
+[resources]
+max_processes = 512

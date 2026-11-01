@@ -1,0 +1,6 @@
+name = "offline"
+description = "No network, but copy and paste work. Good for tools and converters."
+extends = "strict"
+
+[devices]
+clipboard = "full"

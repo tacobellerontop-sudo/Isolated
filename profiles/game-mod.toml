@@ -1,0 +1,13 @@
+name = "game-mod"
+description = "For mods, trainers and launchers: internet and GPU, no access to personal files."
+extends = "strict"
+
+[network]
+mode = "full"
+
+[devices]
+clipboard = "full"
+gpu = true
+
+[resources]
+max_processes = 128

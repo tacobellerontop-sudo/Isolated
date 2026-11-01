@@ -463,6 +463,26 @@ It also runs on Linux and macOS when those backends arrive.
 
 Each milestone ends with something users can run.
 
+### Status: v0.1.0 shipped
+
+v0.1.0 delivers the core of M0 to M3 in one release: policy and profiles,
+the AppContainer + Job Object engine with journaled ACL grants, the
+right-click menu, the egui window, the CLI, and a real-Windows smoke test
+suite in CI. Two changes from the plan below, both in the spirit of keeping
+it light:
+
+- **Installer:** instead of a WiX MSI, `isolated.exe` installs itself per
+  user (`isolated install` or Settings > Install): it copies itself to
+  `%LOCALAPPDATA%\Programs\Isolated`, adds a Start menu shortcut, the
+  right-click menu, and a Settings > Apps uninstall entry. No admin.
+- **Auto-updater (added):** on window open, Isolated checks GitHub Releases,
+  downloads `isolated.exe`, verifies it against the published
+  `isolated.exe.sha256`, and swaps it in place. No background service.
+
+Still to come from M2 to M4: window marking, separate desktop, the Windows 11
+top-level menu add-on, code signing, winget, denial notifications, learn
+mode, loopback and allowlist networking.
+
 ### M0: Foundations (1 to 2 weeks)
 - Cargo workspace; CI on Windows (fmt, clippy, tests, `cargo-deny`), with Linux
   and macOS build checks for the core.

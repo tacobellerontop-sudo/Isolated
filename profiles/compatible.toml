@@ -1,0 +1,9 @@
+name = "compatible"
+description = "Weaker sandbox for apps that break under full isolation: low integrity and a restricted token. Cannot block the network or hide files from reads."
+tier = "compatible"
+
+[network]
+mode = "full"
+
+[devices]
+clipboard = "full"

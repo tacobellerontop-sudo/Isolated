@@ -1,0 +1,64 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to release, such as v0.1.0"
+        required: true
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  release:
+    runs-on: windows-latest
+    steps:
+      # A tag push checks out the tag; a manual run checks out the chosen
+      # branch, and the release step creates the tag on that commit.
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Check the tag matches the crate version
+        shell: pwsh
+        run: |
+          $tag = "${{ github.event.inputs.tag || github.ref_name }}"
+          $version = (Select-String -Path Cargo.toml -Pattern '^version = "(.+)"').Matches[0].Groups[1].Value
+          if ($tag -ne "v$version") { throw "Tag $tag does not match version $version in Cargo.toml" }
+          "TAG=$tag" >> $env:GITHUB_ENV
+          "VERSION=$version" >> $env:GITHUB_ENV
+      - name: Unit tests
+        run: cargo test --workspace
+      - name: Build
+        run: cargo build --release --target x86_64-pc-windows-msvc
+      - name: Sandbox smoke tests
+        shell: pwsh
+        run: scripts\smoke-test.ps1
+      - name: Package
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force dist | Out-Null
+          Copy-Item target\x86_64-pc-windows-msvc\release\isolated.exe dist\isolated.exe
+          $hash = (Get-FileHash dist\isolated.exe -Algorithm SHA256).Hash.ToLower()
+          Set-Content -Path dist\isolated.exe.sha256 -Value "$hash  isolated.exe" -NoNewline
+          $size = (Get-Item dist\isolated.exe).Length
+          "isolated.exe: $([math]::Round($size / 1MB, 2)) MB, sha256 $hash"
+      - name: Publish release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $notes = "docs\releases\$env:TAG.md"
+          if (-not (Test-Path $notes)) { $notes = $null }
+          $ghArgs = @($env:TAG, "dist\isolated.exe", "dist\isolated.exe.sha256", "--title", "Isolated $env:VERSION", "--latest", "--target", $env:GITHUB_SHA)
+          if ($notes) { $ghArgs += @("--notes-file", $notes) } else { $ghArgs += @("--generate-notes") }
+          gh release view $env:TAG 2>$null
+          if ($LASTEXITCODE -eq 0) {
+            gh release upload $env:TAG dist\isolated.exe dist\isolated.exe.sha256 --clobber
+          } else {
+            gh release create @ghArgs
+          }

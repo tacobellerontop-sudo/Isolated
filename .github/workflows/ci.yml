@@ -1,0 +1,45 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+    tags-ignore: ["v*"]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+      - name: Format
+        run: cargo fmt --all -- --check
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: Unit tests
+        run: cargo test --workspace
+      - name: Release build
+        run: cargo build --release --target x86_64-pc-windows-msvc
+      - name: Size budget (6 MB)
+        shell: pwsh
+        run: |
+          $size = (Get-Item target\x86_64-pc-windows-msvc\release\isolated.exe).Length
+          "isolated.exe is $([math]::Round($size / 1MB, 2)) MB"
+          if ($size -gt 6MB) { throw "isolated.exe exceeds the 6 MB budget" }
+      - name: Sandbox smoke tests
+        shell: pwsh
+        run: scripts\smoke-test.ps1
+
+  linux-core:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test -p isolated-core -p isolated-windows
