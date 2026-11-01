@@ -51,8 +51,11 @@ Check "cleanup journal is empty ($left left)" ($left -eq 0)
 # 6. No network by default; network when allowed.
 $code = Run-Sandboxed @("run", "--", $curl, "-s", "-m", "15", "-o", "NUL", "https://github.com")
 Check "network is blocked by default (exit $code)" ($code -ne 0)
-$code = Run-Sandboxed @("run", "--net", "--", $curl, "-s", "-m", "30", "-o", "NUL", "https://github.com")
-Check "network works when allowed (exit $code)" ($code -eq 0)
+# Write the page into a granted folder: the sandbox's working directory
+# (System32 here) is read-only to it, which is what we want.
+$page = Join-Path $secretDir "page.html"
+$code = Run-Sandboxed @("run", "--net", "--rw", $secretDir, "--", $curl, "-s", "-m", "30", "-o", $page, "https://github.com")
+Check "network works when allowed (exit $code)" (($code -eq 0) -and (Test-Path $page))
 
 # 7. Child processes stay in the sandbox: a grandchild can't read the secret either.
 $code = Run-Sandboxed @("run", "--", $cmd, "/d", "/c", "$cmd /d /c type `"$secret`"")
