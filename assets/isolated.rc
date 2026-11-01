@@ -1,0 +1,28 @@
+#pragma code_page(65001)
+1 ICON "isolated.ico"
+1 24 "isolated.manifest"
+
+1 VERSIONINFO
+FILEVERSION VERSION_COMMA
+PRODUCTVERSION VERSION_COMMA
+FILEOS 0x40004
+FILETYPE 0x1
+BEGIN
+  BLOCK "StringFileInfo"
+  BEGIN
+    BLOCK "040904B0"
+    BEGIN
+      VALUE "CompanyName", "Isolated"
+      VALUE "FileDescription", "Isolated - run programs in a sandbox"
+      VALUE "FileVersion", VERSION_STR
+      VALUE "InternalName", "isolated"
+      VALUE "OriginalFilename", "isolated.exe"
+      VALUE "ProductName", "Isolated"
+      VALUE "ProductVersion", VERSION_STR
+    END
+  END
+  BLOCK "VarFileInfo"
+  BEGIN
+    VALUE "Translation", 0x409, 1200
+  END
+END

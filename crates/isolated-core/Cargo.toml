@@ -1,0 +1,9 @@
+[package]
+name = "isolated-core"
+description = "Policy, profiles and shared state for Isolated"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+serde.workspace = true
+toml.workspace = true

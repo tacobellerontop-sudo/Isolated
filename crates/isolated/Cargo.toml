@@ -1,0 +1,20 @@
+[package]
+name = "isolated"
+description = "Run any program in a sandbox, from the right-click menu"
+version.workspace = true
+edition.workspace = true
+repository.workspace = true
+build = "build.rs"
+
+[[bin]]
+name = "isolated"
+path = "src/main.rs"
+
+[dependencies]
+isolated-core.workspace = true
+isolated-windows.workspace = true
+isolated-gui.workspace = true
+lexopt.workspace = true
+
+[build-dependencies]
+embed-resource = "3"

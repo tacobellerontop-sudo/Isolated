@@ -1,0 +1,9 @@
+name = "online"
+description = "Internet allowed, copy and paste work, private folders only."
+extends = "strict"
+
+[network]
+mode = "full"
+
+[devices]
+clipboard = "full"

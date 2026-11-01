@@ -1,0 +1,25 @@
+[workspace]
+resolver = "2"
+members = ["crates/isolated-core", "crates/isolated-windows", "crates/isolated-gui", "crates/isolated"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+repository = "https://github.com/tacobellerontop-sudo/Isolated"
+rust-version = "1.80"
+
+[workspace.dependencies]
+isolated-core = { path = "crates/isolated-core" }
+isolated-windows = { path = "crates/isolated-windows" }
+isolated-gui = { path = "crates/isolated-gui" }
+serde = { version = "1", default-features = false, features = ["derive", "std"] }
+serde_json = { version = "1", default-features = false, features = ["std"] }
+toml = { version = "1", default-features = false, features = ["parse", "display", "serde", "std"] }
+lexopt = "0.3"
+
+[profile.release]
+opt-level = "s"
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = true

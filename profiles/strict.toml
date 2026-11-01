@@ -1,0 +1,9 @@
+# The safe default: an empty private home, no network, no clipboard.
+name = "strict"
+description = "No network, no clipboard, empty private folders. Used when an app has no profile."
+
+[network]
+mode = "none"
+
+[devices]
+clipboard = "none"

@@ -1,0 +1,13 @@
+[package]
+name = "isolated-gui"
+description = "egui window for Isolated"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+isolated-core.workspace = true
+isolated-windows.workspace = true
+eframe = { version = "0.37", default-features = false, features = ["glow", "clipboard"] }
+
+[target.'cfg(unix)'.dependencies]
+eframe = { version = "0.37", default-features = false, features = ["glow", "clipboard", "x11"] }
