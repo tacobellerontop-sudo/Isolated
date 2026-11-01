@@ -10,9 +10,14 @@ This document covers what Isolated is for, how it is built, how isolation works
 on each platform, and the order in which it will be delivered.
 
 > **Target for v1:** **Windows 10 (1809+) and Windows 11**, delivered as a
-> **desktop GUI app**. A command-line tool ships alongside it, sharing the same
-> core. Linux and macOS backends come in later milestones. The architecture is
-> designed so those additions do not require reworking the core.
+> small **egui desktop app** whose main entry point is a **"Run in Isolated"
+> option in the Windows right-click context menu**. A command-line tool ships
+> alongside it, sharing the same core. Linux and macOS backends come in later
+> milestones.
+>
+> **Lightweight is a core requirement.** No web view, no runtime, no always-on
+> background service, and nothing running at all when no sandbox is active.
+> See section 3.1 for concrete budgets.
 
 ---
 
@@ -58,9 +63,14 @@ on each platform, and the order in which it will be delivered.
 
 ### Main GUI flows
 
-1. **Quick run.** Right-click an `.exe` in Explorer, choose **Run in Isolated**.
-   It launches with the `strict` profile: empty private folder, no network, no
-   clipboard. A colored border or taskbar badge marks the window as sandboxed.
+1. **Quick run (primary flow).** Right-click an `.exe` (or a shortcut, `.bat`,
+   `.cmd`, `.ps1`, or `.msi` extracted payload) in Explorer and choose
+   **Run in Isolated**. It launches straight away with the app's saved profile,
+   or with `strict` if there isn't one: empty private folder, no network, no
+   clipboard. No window opens unless something needs the user's attention.
+   A submenu offers **Run in Isolated (offline)**, **Run in Isolated with
+   options...** (opens a small egui dialog with permission toggles), and
+   **Edit Isolated profile...**.
 2. **Create an app profile.** In the Isolated window, choose **Add app**, pick an
    executable, and toggle permissions: folders (read-only or read-write),
    network (off, on, or allowlist), clipboard, microphone, camera, printers.
@@ -90,51 +100,82 @@ isolated kill <id>
 ## 3. Architecture overview
 
 ```
-   ┌──────────────────────────────────────────────────────────────┐
-   │ Front ends                                                   │
-   │ isolated-gui (v1, Tauri)        isolated-cli (v1, companion) │
-   │ Explorer context-menu handler                                │
-   └──────────────┬───────────────────────────────────────────────┘
-                  │ local IPC (named pipe)
-   ┌──────────────▼───────────────────────────────────────────────┐
-   │ isolated-agent  (per-user background process, no admin)      │
-   │ • Launches and tracks sandboxes                              │
-   │ • Collects denial events, raises notifications               │
-   │ • Cleans up ACLs and temp folders on exit or crash           │
-   └──────────────┬───────────────────────────┬───────────────────┘
-                  │ uses                      │ optional, named pipe
-   ┌──────────────▼──────────────┐   ┌────────▼───────────────────┐
-   │ isolated-core               │   │ isolated-service           │
-   │ policy, profiles, lifecycle │   │ (Windows service, admin    │
-   │ events, Backend trait       │   │ install) WFP network rules │
-   └──────────────┬──────────────┘   └────────────────────────────┘
-                  │ Backend trait
-     ┌────────────┼───────────────────────┐
-     ▼            ▼                       ▼
-isolated-windows  isolated-linux (later)  isolated-macos (later)
-AppContainer,     namespaces, Landlock,   Seatbelt
-Job Objects,      seccomp, cgroups v2
-restricted tokens
+   Explorer right-click ──► isolated.exe run "<target>"      (no window)
+                                   │
+   isolated.exe (egui window) ─────┤   same single binary
+   isolated.exe (CLI)  ────────────┤
+                                   ▼
+             ┌─────────────────────────────────────────┐
+             │ isolated-core                           │
+             │ policy, profiles, lifecycle, events     │
+             └──────────────────┬──────────────────────┘
+                                │ Backend trait
+             ┌──────────────────┼───────────────────────┐
+             ▼                  ▼                       ▼
+     isolated-windows    isolated-linux (later)  isolated-macos (later)
+     AppContainer,       namespaces, Landlock,   Seatbelt
+     Job Objects,        seccomp, cgroups v2
+     restricted tokens
+                                │
+                                ▼
+     per-sandbox watcher: the same isolated.exe process stays alive,
+     windowless, waiting on the Job Object; exits when the app exits
+
+     isolated-service.exe (optional, admin install): WFP network allowlists
 ```
 
 Key ideas:
 
-1. **One policy model, many backends.** Users configure one profile. Each
+1. **One small binary.** `isolated.exe` is the context-menu handler target, the
+   GUI, and the CLI. Which one runs depends on the arguments. There is no
+   separate agent or helper DLL to install or keep running.
+2. **Context menu first.** The right-click entry is the main way users start
+   sandboxes. The egui window is for managing profiles, viewing running
+   sandboxes, and responding to denials, and only opens when asked for.
+3. **Nothing resident.** No startup entry and no background service by default.
+   When a sandbox is launched, that `isolated.exe` process becomes a windowless
+   watcher: it waits on the Job Object, cleans up ACLs and temp folders when the
+   app exits, then exits itself. Running sandboxes register in a small shared
+   file under `%LOCALAPPDATA%\Isolated\running\` so the GUI and `isolated ps`
+   can list and stop them.
+4. **One policy model, many backends.** Users configure one profile. Each
    platform backend translates it into native mechanisms and reports anything
    it cannot enforce, so nothing is silently weaker than requested.
-2. **Fail closed.** If a requested restriction cannot be applied, the launch
+5. **Fail closed.** If a requested restriction cannot be applied, the launch
    fails with a clear message unless the user explicitly accepts a weaker
    sandbox.
-3. **Thin front ends.** The GUI and CLI only collect input and display results.
-   All logic lives in `isolated-core` and the agent, so both behave identically.
-4. **A per-user agent from day one.** The GUI needs live sandbox lists, denial
-   notifications, and reliable cleanup even when the GUI is closed, so a small
-   per-user agent (started at login, runs without admin) owns sandbox
-   lifecycles. The CLI talks to the agent if it's running and can launch
-   sandboxes directly if not.
-5. **Admin only where unavoidable.** Network allowlists need Windows Filtering
+6. **Admin only where unavoidable.** Network allowlists need Windows Filtering
    Platform rules, which require a privileged service. That service is an
    optional install; everything else works for standard users.
+
+### 3.1 Lightweight budgets
+
+These are release-blocking targets, measured in CI:
+
+| Measure | Target |
+| --- | --- |
+| Installer size | under 5 MB |
+| `isolated.exe` size (GUI + CLI + backend) | under 6 MB |
+| Memory when no sandbox is running | 0 (no process running) |
+| Memory per sandbox watcher | under 3 MB working set |
+| GUI window memory | under 40 MB |
+| Context-menu click to app start | under 150 ms |
+| Runtime dependencies | none (no .NET, no WebView2, no VC++ redistributable: CRT statically linked) |
+
+How the plan meets them:
+
+- **egui via `eframe` with the `glow` (OpenGL) backend** instead of `wgpu`, which
+  keeps the binary small. Fall back to software rendering if no GPU driver.
+- **No async runtime.** Launching and watching a sandbox is a handful of Win32
+  calls and one blocking wait; plain `std` threads are enough. No `tokio`.
+- **Minimal dependencies.** Only the `windows` crate features actually used are
+  enabled; `default-features = false` everywhere.
+- **Release profile:** `opt-level = "s"`, `lto = "fat"`, `codegen-units = 1`,
+  `panic = "abort"`, `strip = true`, `+crt-static`.
+- **The watcher never loads the GUI.** The egui and OpenGL code paths are only
+  touched when a window is opened, so a context-menu launch stays tiny.
+- **Dependency and size checks in CI** (`cargo bloat`, `cargo tree -d`) fail the
+  build if a budget is exceeded.
 
 ### The `Backend` trait (sketch)
 
@@ -204,6 +245,8 @@ set  = { NO_UPDATE_CHECK = "1" }
 Rules:
 
 - Everything not granted is denied.
+- Profiles are matched to programs by full path (and optionally file hash), so
+  the context menu picks the right profile automatically.
 - Paths are canonicalized, with junctions, symlinks, and 8.3 short names
   resolved before enforcement.
 - Built-in profiles ship for common cases (`strict`, `offline`, `game-mod`,
@@ -216,14 +259,40 @@ Rules:
 
 ### 5.1 Windows (v1)
 
-Windows has no single sandbox primitive, so Isolated layers several, the same
-approach Chromium and Edge use.
+#### Context-menu integration
+
+Kept as light as possible: **plain registry verbs, no shell extension DLL**.
+The installer (or `isolated.exe --register`, per-user, no admin) writes keys
+under `HKCU\Software\Classes`:
+
+```
+HKCU\Software\Classes\exefile\shell\Isolated
+    MUIVerb      = "Run in Isolated"
+    Icon         = "C:\...\isolated.exe,0"
+    SubCommands  = ""
+    shell\01run\command      = "C:\...\isolated.exe" run "%1"
+    shell\02offline\command  = "C:\...\isolated.exe" run --no-net "%1"
+    shell\03options\command  = "C:\...\isolated.exe" options "%1"
+    shell\04profile\command  = "C:\...\isolated.exe" profile edit "%1"
+```
+
+Equivalent entries are added for `lnkfile`, `batfile`, `cmdfile`, and
+`Microsoft.PowerShellScript.1`. `isolated.exe --unregister` removes them all.
+
+Tradeoff: on **Windows 11** classic registry verbs appear under
+**Show more options**, not in the compact top-level menu. Getting into the
+top-level menu requires an `IExplorerCommand` COM handler registered through a
+sparse MSIX package. That is planned as an **optional add-on in M3**, written
+as a tiny separate DLL so the main binary stays unchanged. Users who don't
+want it keep the zero-DLL setup.
+
+#### Isolation mechanisms
 
 | Concern | Mechanism | Notes |
 | --- | --- | --- |
 | Identity | **AppContainer** with a per-profile SID (`CreateAppContainerProfile`) | The app runs as the user but with a capability-based token that is denied almost everything by default. |
 | Stricter identity | **Less Privileged AppContainer (LPAC)** for the `strict` profile | Also blocks access to resources that grant "ALL APPLICATION PACKAGES". |
-| Filesystem | ACL grants to the AppContainer SID on allowed paths only | Grants are recorded in a journal and removed on exit, crash, or next agent start. |
+| Filesystem | ACL grants to the AppContainer SID on allowed paths only | Grants are recorded in a journal and removed on exit, crash, or next Isolated launch. |
 | Private home | Per-sandbox AppContainer storage folder, plus `USERPROFILE`/`APPDATA`/`TEMP` redirected to it | App can write settings without touching real ones. |
 | Registry | AppContainer's private registry hive; no grants to `HKCU` by default | |
 | Network: none / full | AppContainer capabilities (`internetClient`, `privateNetworkClientServer`) omitted or granted | Enforced by the OS firewall for AppContainers. |
@@ -235,9 +304,10 @@ approach Chromium and Edge use.
 | Exploit mitigations | `PROC_THREAD_ATTRIBUTE_MITIGATION_POLICY`: disable child process creation (when profile allows), block non-Microsoft-signed DLLs (opt-in), CFG/CET strict, no remote image loads | Applied at `CreateProcess` time. |
 | Devices | AppContainer capabilities for microphone, webcam, removable storage, documents library | Off unless the profile grants them. |
 
-Launch sequence on Windows:
+Launch sequence on Windows (triggered by the context menu, GUI, or CLI):
 
-1. Agent loads and validates the policy; checks Windows build and features.
+1. `isolated.exe` loads the profile matching the target path (or `strict`),
+   validates it, and checks Windows build and features.
 2. Create or open the AppContainer profile for this app (or LPAC for strict).
 3. Apply ACL grants for allowed paths and write them to the cleanup journal.
 4. If network allowlist is set, ask `isolated-service` to install WFP filters
@@ -248,8 +318,9 @@ Launch sequence on Windows:
    policies, job list, and handle allowlist (no inherited handles except
    stdio), then `CreateProcessW` suspended.
 7. Assign to job, resume the main thread.
-8. Agent watches the job for process events and exit, collects denial events,
-   then removes ACLs, WFP filters, and temporary folders.
+8. The same process drops into windowless watcher mode: it registers the
+   sandbox in the running list, waits on the job, then removes ACLs, WFP
+   filters, and temporary folders and exits.
 
 Known challenges and how the plan handles them:
 
@@ -261,8 +332,9 @@ Known challenges and how the plan handles them:
 - **Installers that need admin.** Out of scope for v1; the GUI explains that
   elevated programs cannot be sandboxed and suggests extracting or using
   portable versions.
-- **ACL leftovers after a crash.** The cleanup journal is replayed on agent
-  start; a "Repair" button in settings does the same on demand.
+- **ACL leftovers after a crash.** The cleanup journal is replayed on the next
+  launch of `isolated.exe`; a "Repair" button in the GUI does the same on
+  demand.
 - **Denial visibility.** Windows doesn't report AppContainer access denials
   directly. Isolated reads them from **ETW** (Kernel-File, Security auditing
   for object access, WFP drop events) filtered by the sandbox SID. This also
@@ -323,16 +395,13 @@ isolated/
 ├── Cargo.toml                # workspace
 ├── crates/
 │   ├── isolated-core/        # policy, profiles, Backend trait, lifecycle, events
-│   ├── isolated-ipc/         # agent/service protocol types and named-pipe transport
-│   ├── isolated-windows/     # Windows backend: AppContainer, jobs, ACLs, ETW
-│   ├── isolated-agent/       # per-user agent
-│   ├── isolated-service/     # optional admin Windows service (WFP)
-│   ├── isolated-shell/       # Explorer context-menu handler (COM, IExplorerCommand)
-│   ├── isolated-cli/         # `isolated` binary
-│   ├── isolated-gui/         # Tauri desktop app
+│   ├── isolated-windows/     # Windows backend: AppContainer, jobs, ACLs, context-menu registration
+│   ├── isolated-gui/         # egui screens (library, linked into the main binary)
+│   ├── isolated/             # the single `isolated.exe`: CLI + GUI + watcher
+│   ├── isolated-service/     # optional admin Windows service for WFP (M4)
+│   ├── isolated-shellext/    # optional Windows 11 top-level menu DLL (M3)
 │   ├── isolated-linux/       # later
 │   └── isolated-macos/       # later
-├── gui/                      # GUI frontend (TypeScript + a small component library)
 ├── profiles/                 # built-in profiles
 ├── installer/                # WiX / MSIX packaging
 ├── tests/                    # escape tests and integration tests
@@ -341,28 +410,24 @@ isolated/
 
 ### Third-party crates
 
+Kept deliberately short.
+
 | Purpose | Crate |
 | --- | --- |
-| Windows APIs (AppContainer, jobs, ACLs, WFP, desktops) | `windows` (official Microsoft bindings) |
-| ETW consumption for denial events | `ferrisetw` |
-| Windows service | `windows-service` |
-| Explorer integration (COM) | `windows` with `implement` feature |
-| GUI shell | `tauri` v2 (uses WebView2, present on Windows 10/11) |
-| Notifications | `tauri-plugin-notification` |
-| CLI parsing | `clap` (derive) |
-| Config and profiles | `serde`, `toml` |
-| IPC messages | `serde` + `postcard` over named pipes (`tokio::net::windows::named_pipe`) |
-| Async (agent, service, GUI) | `tokio` |
-| Errors | `thiserror` (libraries), `anyhow` (binaries) |
-| Logging | `tracing`, `tracing-subscriber`, `tracing-appender` |
+| Windows APIs (AppContainer, jobs, ACLs, WFP, desktops, registry) | `windows` (official Microsoft bindings, only needed features enabled) |
+| GUI | `eframe` / `egui` with the `glow` renderer |
+| CLI parsing | `lexopt` (tiny) or `clap` with default features off |
+| Profiles | `serde`, `toml` |
+| Errors | `thiserror` in libraries; plain `Box<dyn Error>` in the binary |
+| Logging | `log` + a small file logger (off unless enabled) |
+| ETW denial events (M4) | `ferrisetw`, behind a cargo feature |
+| Windows service (M4, optional) | `windows-service` |
 | Linux later | `rustix`, `landlock`, `seccompiler` |
-| Testing | `assert_cmd`, `insta`, `proptest` |
+| Testing (dev only) | `assert_cmd`, `insta`, `proptest` |
 
-**Why Tauri for the GUI:** WebView2 ships with Windows 10/11, so the installer
-stays small; the UI can be built quickly with familiar web tooling; the Rust
-side calls `isolated-core` directly; and Tauri runs on Linux and macOS when
-those backends arrive. `iced` or `slint` are pure-Rust alternatives if a
-web-free UI becomes a priority.
+**Why egui:** it is pure Rust, builds into the same binary as the core with no
+web view or runtime, starts instantly, and needs no separate frontend toolchain.
+It also runs on Linux and macOS when those backends arrive.
 
 ---
 
@@ -372,19 +437,21 @@ web-free UI becomes a priority.
   Job Object, and mitigation policies each block different escape routes.
 - **Minimal `unsafe`.** All Win32 calls live in `isolated-windows` behind small,
   documented safe wrappers (owned handles, RAII ACL grants that revert on drop).
-  `isolated-core`, `isolated-cli`, and the GUI use `#![forbid(unsafe_code)]`.
+  `isolated-core` and `isolated-gui` use `#![forbid(unsafe_code)]`.
+- **Context-menu input is untrusted.** Paths arriving from `%1` are
+  canonicalized and checked before use; the verb never runs through a shell.
 - **Small privileged surface.** `isolated-service` only installs and removes WFP
   filters for SIDs it created, validates every request, and accepts connections
-  only from the user's agent.
+  only from `isolated.exe` processes run by the same user.
 - **Escape test suite.** Small hostile programs that try to read the real user
   folder, browser profiles, and SSH keys; open sockets; inject into or read
   memory of other processes; hook keyboard input; read the clipboard; escape
   the job by breakaway; abuse junctions and TOCTOU races; fork-bomb. Every one
   must fail in CI.
 - **Fuzzing.** `cargo-fuzz` targets for profile parsing, path normalization, and
-  IPC message decoding.
-- **Supply chain.** `cargo-deny` and `cargo-audit` in CI; npm dependencies for the
-  GUI pinned and audited; signed releases.
+  service request decoding.
+- **Supply chain.** `cargo-deny` and `cargo-audit` in CI; a short, reviewed
+  dependency list; signed releases.
 - **Threat model doc.** A `docs/THREAT_MODEL.md` written in M0 stating exactly
   what Isolated defends against and what it does not.
 - **Disclosure.** `SECURITY.md` with a private reporting address before the
@@ -408,35 +475,37 @@ Each milestone ends with something users can run.
 - ACL grants with cleanup journal; Job Objects with limits and UI restrictions.
 - Restricted token, low integrity, mitigation policies.
 - Network none / full / loopback via capabilities.
-- `isolated run` CLI for testing the engine; escape test suite v1.
-- **Deliverable:** a working CLI sandbox on Windows (internal / early testers).
+- `isolated run` CLI and windowless watcher mode; escape test suite v1.
+- Size and memory budgets wired into CI from the start.
+- **Deliverable:** a working CLI sandbox on Windows (early testers).
 
-### M2: GUI and agent MVP (4 to 5 weeks)
-- `isolated-agent` with named-pipe IPC, sandbox tracking, crash cleanup.
-- Tauri app: app list, **Add app** wizard with permission toggles, launch,
-  **Running** view with stop, settings.
+### M2: Context menu and egui app (3 to 4 weeks)
+- `isolated --register` / `--unregister` writing the per-user context-menu
+  verbs for `.exe`, `.lnk`, `.bat`, `.cmd`, `.ps1`.
+- Profile matching by program path, so a right-click uses the saved profile.
+- egui window: app profiles list, permission toggles, **Running** view with
+  stop, the "with options..." dialog, settings.
 - Sandboxed-window marking (border or badge).
 - Built-in profiles; "compatible" tier for apps that break in AppContainer.
-- **Deliverable:** users can install Isolated, add an app, and run it sandboxed
-  from the GUI.
+- **Deliverable:** users can right-click any program and run it sandboxed.
 
-### M3: Windows integration and first release (3 weeks)
-- Explorer **Run in Isolated** context menu; drag-and-drop onto the window.
-- Start-menu shortcuts for sandboxed apps.
-- MSI installer (WiX) and winget package; code signing; auto-update.
+### M3: First release (2 to 3 weeks)
+- Small installer (WiX MSI) and a portable zip; winget package; code signing.
+- Optional Windows 11 top-level context-menu add-on (`IExplorerCommand` DLL).
 - Clipboard, microphone, camera, printer permission controls.
 - Optional separate-desktop mode.
-- **Deliverable:** first public release, **v0.1**.
+- **Deliverable:** first public release, **v0.1**, within the size budgets.
 
 ### M4: Denials, learn mode, and network allowlists (4 weeks)
-- ETW-based denial events surfaced as GUI notifications with allow once /
-  allow always.
+- ETW-based denial events surfaced as Windows toast notifications with allow
+  once / allow always (the watcher raises them; the GUI isn't needed).
 - Learn mode that proposes a profile from observed access.
 - `isolated-service` and WFP-based host:port allowlists, installed on demand.
 - **Deliverable:** v0.2.
 
 ### M5: Linux backend (4 weeks)
-- Namespaces, Landlock, seccomp, cgroups v2; GUI and CLI work unchanged on Linux.
+- Namespaces, Landlock, seccomp, cgroups v2; egui app and CLI work unchanged.
+- File-manager integration (Nautilus/Dolphin actions) mirroring the context menu.
 - **Deliverable:** v0.3 with Linux support.
 
 ### M6: macOS backend (3 to 4 weeks)
@@ -454,7 +523,9 @@ Each milestone ends with something users can run.
 | Escape suite | Hostile test binaries run under each built-in profile; any success fails CI. |
 | OS coverage | Test matrix across Windows 10 22H2, Windows 11 current, and Windows Server 2022 (runner image). |
 | App compatibility | A list of popular apps (7-Zip, VLC, Notepad++, game launchers, Python, Node) launched under their built-in profiles in a nightly VM job. |
-| GUI | Frontend component tests; end-to-end tests with WebDriver (`tauri-driver`). |
+| Context menu | Tests that `--register` / `--unregister` write and remove exactly the expected keys, and that the verbs launch correctly with tricky paths (spaces, Unicode, quotes). |
+| GUI | Unit tests on GUI state; `egui_kittest` snapshot tests of key screens. |
+| Footprint | CI fails if binary size, installer size, watcher memory, or launch time exceeds the budgets in section 3.1. |
 | CLI | `assert_cmd` + `insta` snapshots of output and error messages. |
 | Performance | Benchmark launch overhead (target under 150 ms); regressions over 20% fail CI. |
 
@@ -468,7 +539,8 @@ Each milestone ends with something users can run.
    option to keep forks open.
 3. **Distribution.** MSI + winget only, or also the Microsoft Store (MSIX)? Store
    packaging limits the admin service.
-4. **GUI framework.** Tauri is the recommendation above; confirm before M2.
+4. **Windows 11 top-level menu.** Is the optional `IExplorerCommand` add-on
+   worth shipping in v0.1, or is "Show more options" acceptable at first?
 5. **Pricing / openness.** Fully open source, or open core with paid extras?
 
 ---
