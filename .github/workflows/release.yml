@@ -19,9 +19,9 @@ jobs:
   release:
     runs-on: windows-latest
     steps:
+      # A tag push checks out the tag; a manual run checks out the chosen
+      # branch, and the release step creates the tag on that commit.
       - uses: actions/checkout@v4
-        with:
-          ref: ${{ github.event.inputs.tag || github.ref }}
       - uses: dtolnay/rust-toolchain@stable
       - name: Check the tag matches the crate version
         shell: pwsh
@@ -54,7 +54,7 @@ jobs:
         run: |
           $notes = "docs\releases\$env:TAG.md"
           if (-not (Test-Path $notes)) { $notes = $null }
-          $ghArgs = @($env:TAG, "dist\isolated.exe", "dist\isolated.exe.sha256", "--title", "Isolated $env:VERSION", "--latest")
+          $ghArgs = @($env:TAG, "dist\isolated.exe", "dist\isolated.exe.sha256", "--title", "Isolated $env:VERSION", "--latest", "--target", $env:GITHUB_SHA)
           if ($notes) { $ghArgs += @("--notes-file", $notes) } else { $ghArgs += @("--generate-notes") }
           gh release view $env:TAG 2>$null
           if ($LASTEXITCODE -eq 0) {
