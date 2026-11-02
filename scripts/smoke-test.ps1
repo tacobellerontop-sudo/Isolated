@@ -25,6 +25,29 @@ Set-Content -Path $secret -Value "do not read me"
 
 & $Exe --version | Out-Host
 
+# PROBE (temporary): where do known folders point inside a sandbox?
+$probeDir = Join-Path $env:USERPROFILE "isolated-probe"
+New-Item -ItemType Directory -Force -Path $probeDir | Out-Null
+$ps = "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe"
+$probeOut = Join-Path $probeDir "out.txt"
+$script = Join-Path $probeDir "probe.ps1"
+Set-Content -Path $script -Value @"
+`$o = @()
+foreach (`$f in 'LocalApplicationData','ApplicationData','Programs','Desktop','UserProfile','StartMenu') { `$o += "`$f = " + [Environment]::GetFolderPath(`$f) }
+`$o += "env LOCALAPPDATA = `$env:LOCALAPPDATA"
+`$o += "env USERPROFILE = `$env:USERPROFILE"
+try { New-Item -Path 'HKCU:\Software\IsolatedProbe' -Force -ErrorAction Stop | Out-Null; `$o += 'HKCU write OK' } catch { `$o += "HKCU write failed: `$_" }
+try { `$t = Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) 'probe.txt'; Set-Content `$t 'x' -ErrorAction Stop; `$o += "write known LocalAppData OK `$t" } catch { `$o += "write known LocalAppData failed: `$_" }
+try { `$t = Join-Path `$env:LOCALAPPDATA 'probe.txt'; Set-Content `$t 'x' -ErrorAction Stop; `$o += "write env LOCALAPPDATA OK" } catch { `$o += "write env LOCALAPPDATA failed: `$_" }
+Set-Content -Path '$probeOut' -Value (`$o -join "`r`n")
+"@
+$code = Run-Sandboxed @("run", "--rw", $probeDir, "--", $ps, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $script)
+Write-Host "PROBE exit $code"
+Get-Content $probeOut -ErrorAction SilentlyContinue | ForEach-Object { Write-Host "PROBE $_" }
+$code = Run-Sandboxed @("run", "--compatible", "--accept-weaker", "--rw", $probeDir, "--", $ps, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $script)
+Write-Host "PROBE compatible exit $code"
+Get-Content $probeOut -ErrorAction SilentlyContinue | ForEach-Object { Write-Host "PROBE(c) $_" }
+
 # 1. Files outside the sandbox are not readable.
 $code = Run-Sandboxed @("run", "--", $cmd, "/d", "/c", "type `"$secret`"")
 Check "user files are hidden by default (exit $code)" ($code -ne 0)
