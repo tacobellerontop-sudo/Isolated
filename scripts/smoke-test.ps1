@@ -132,25 +132,12 @@ Name: "{autoprograms}\Uninstall Hello Smoke"; Filename: "{uninstallexe}"
     }
     $code = Run-Sandboxed @("box", "run", "HelloSmoke", "`"Hello Smoke`"", "/d", "/c", "exit 5")
     Check "Inno-installed app runs from its shortcut entry (exit $code)" ($code -eq 5)
-    # EXPERIMENTS (temporary)
-    $ac = Get-ChildItem -Path (Join-Path $env:LOCALAPPDATA "Packages") -Filter "isolated.box.HelloSmoke*" | Select-Object -First 1
-    $acDir = Join-Path $ac.FullName "AC"
-    Write-Host "EXP root attrs from sandbox:"
-    $code = Run-Sandboxed @("run", "--rw", $secretDir, "--", $cmd, "/d", "/c", "dir C:\ > `"$secretDir\root.txt`" 2>&1")
-    Write-Host "EXP dir C:\ exit $code"; Get-Content "$secretDir\root.txt" -ErrorAction SilentlyContinue | Select-Object -First 5 | Out-Host
-    subst I: $acDir
-    $code = Run-Sandboxed @("run", "--rw", $secretDir, "--", $cmd, "/d", "/c", "dir I:\ > `"$secretDir\subst.txt`" 2>&1")
-    Write-Host "EXP dir I:\ (subst to other AC) exit $code"; Get-Content "$secretDir\subst.txt" -ErrorAction SilentlyContinue | Select-Object -First 8 | Out-Host
-    $code = Run-Sandboxed @("box", "install", "--no-net", "--box", "HelloSmoke", "--", $setup, "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/LOG", "/DIR=I:\Programs\Hello")
-    Write-Host "EXP inno via subst exit $code"
-    Get-Content (Join-Path $boxesDir "HelloSmoke.toml") | Out-Host
-    Get-ChildItem -Recurse -Path $acDir -Filter "Setup Log*.txt" | Sort-Object LastWriteTime | Select-Object -Last 1 | ForEach-Object { Get-Content $_.FullName | Out-Host }
-    subst I: /D
-    $code = Run-Sandboxed @("box", "install", "--no-net", "--profile", "compatible", "--accept-weaker", "--box", "InnoCompat", "--", $setup, "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/LOG")
-    Write-Host "EXP inno compatible exit $code"
-    Get-Content (Join-Path $boxesDir "InnoCompat.toml") -ErrorAction SilentlyContinue | Out-Host
-    Get-ChildItem -Recurse -Path "$env:USERPROFILE\AppData\LocalLow\Isolated" -Filter "Setup Log*.txt" -ErrorAction SilentlyContinue | Select-Object -Last 1 | ForEach-Object { Get-Content $_.FullName | Out-Host }
-    Run-Sandboxed @("box", "delete", "InnoCompat") | Out-Null
+    $uninst = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall"
+    Check "installer's uninstall entry is removed afterwards" (-not (Test-Path "$uninst\Hello Smoke_is1"))
+    $regAcl = (Get-Acl $uninst).Access | Where-Object { $_.IdentityReference.Value -match "S-1-15-2-" }
+    Check "registry grant is removed afterwards" (-not $regAcl)
+    $drives = (Get-PSDrive -PSProvider FileSystem).Root -join " "
+    Check "temporary drive letter is removed ($drives)" (-not ((subst) -match "isolated.box"))
     Run-Sandboxed @("box", "delete", "HelloSmoke") | Out-Null
 } else {
     Write-Host "SKIP  Inno Setup is not available on this machine"

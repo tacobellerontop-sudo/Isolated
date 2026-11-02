@@ -634,10 +634,19 @@ pub fn launch(dirs: &Dirs, policy: &Policy, req: &LaunchRequest) -> Result<Runni
             let base = c.folder()?;
             private = Some(make_private_dirs(&base, private_home)?);
             // The container already owns its folder; never grant inside it.
-            let grants: Vec<Grant> = grants_for(policy, &prepared.program)?
+            let mut grants: Vec<Grant> = grants_for(policy, &prepared.program)?
                 .into_iter()
                 .filter(|g| !under(Path::new(&g.path), &base))
                 .collect();
+            if req.installer && req.app_box.is_some() {
+                // Installers stop if they cannot register an uninstall
+                // entry. Allow creating new ones; they are deleted when the
+                // installer exits.
+                grants.push(Grant {
+                    path: format!(r"HKCU\{}", super::reg::UNINSTALL_KEY),
+                    access: Access::RegistryCreate,
+                });
+            }
             if !grants.is_empty() {
                 let entry = JournalEntry {
                     sandbox_id: id.clone(),

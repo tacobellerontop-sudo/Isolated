@@ -725,6 +725,13 @@ fn box_install(mut parser: lexopt::Parser, dirs: &Dirs, store: &ProfileStore, ou
 
     let folder = isolated_windows::boxes::folder(&policy, &b.name)?;
     let before = isolated_windows::boxes::snapshot(&folder);
+    // Fully isolated sandboxes cannot see the system drive's root, which
+    // some installers check; give them a drive whose root is the box.
+    let alias = if policy.tier == Tier::Isolated {
+        isolated_windows::boxes::DriveAlias::map(&folder).ok()
+    } else {
+        None
+    };
 
     // Ask installers we recognize to install for this user, into the box.
     let mut pre = Vec::new();
@@ -733,7 +740,8 @@ fn box_install(mut parser: lexopt::Parser, dirs: &Dirs, store: &ProfileStore, ou
         let head = read_head(&target, 8 << 20);
         let kind = isolated_core::boxes::detect_installer(&head);
         let app_dir = isolated_core::boxes::name_from_installer(&target_s);
-        let dir = isolated_windows::boxes::install_dir(&policy, &folder, &app_dir);
+        let base = alias.as_ref().map(|a| a.root()).unwrap_or_else(|| folder.clone());
+        let dir = isolated_windows::boxes::install_dir(&policy, &base, &app_dir);
         let (p, tail) = isolated_core::boxes::per_user_args(kind, &dir.to_string_lossy(), !args.is_empty());
         pre = p;
         raw_tail = tail.join(" ");
@@ -758,7 +766,8 @@ fn box_install(mut parser: lexopt::Parser, dirs: &Dirs, store: &ProfileStore, ou
     ));
     let code = sandbox.wait()?;
 
-    let (shortcuts, exes) = isolated_windows::boxes::found_since(&folder, &before);
+    let (shortcuts, exes) = isolated_windows::boxes::found_since(&folder, &before, alias.as_ref());
+    drop(alias);
     let found = isolated_core::boxes::choose_apps(&shortcuts, &exes);
     // Re-read: the window may have changed the box while we waited.
     let mut b = AppBox::load(dirs, &b.name).unwrap_or(b);

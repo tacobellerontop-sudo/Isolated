@@ -128,6 +128,40 @@ pub mod boxes {
         }
     }
 
+    /// A drive letter mapped to a box folder while an installer runs (see
+    /// `win/drive.rs` for why). Removed on drop.
+    pub struct DriveAlias {
+        #[cfg(windows)]
+        inner: crate::win::drive::DriveAlias,
+    }
+
+    impl DriveAlias {
+        pub fn map(folder: &Path) -> Result<DriveAlias> {
+            #[cfg(windows)]
+            return crate::win::drive::DriveAlias::map(folder).map(|inner| DriveAlias { inner });
+            #[cfg(not(windows))]
+            {
+                let _ = folder;
+                unsupported()
+            }
+        }
+
+        /// The drive root, such as `Y:\\`.
+        pub fn root(&self) -> PathBuf {
+            #[cfg(windows)]
+            return self.inner.root();
+            #[cfg(not(windows))]
+            PathBuf::new()
+        }
+
+        pub fn to_real(&self, p: &Path) -> PathBuf {
+            #[cfg(windows)]
+            return self.inner.to_real(p);
+            #[cfg(not(windows))]
+            p.to_path_buf()
+        }
+    }
+
     /// Where an installer is asked to install `app` inside the box.
     pub fn install_dir(policy: &Policy, folder: &Path, app: &str) -> PathBuf {
         #[cfg(windows)]
@@ -228,7 +262,11 @@ pub mod boxes {
 
     /// Shortcuts and programs that appeared in the box since `before`.
     /// Shortcuts pointing outside the box are ignored.
-    pub fn found_since(folder: &Path, before: &BTreeSet<String>) -> (Vec<FoundShortcut>, Vec<FoundExe>) {
+    pub fn found_since(
+        folder: &Path,
+        before: &BTreeSet<String>,
+        alias: Option<&DriveAlias>,
+    ) -> (Vec<FoundShortcut>, Vec<FoundExe>) {
         let root = isolated_core::profile::normalize_path_key(&folder.to_string_lossy());
         let mut shortcuts = Vec::new();
         let mut exes = Vec::new();
@@ -239,6 +277,10 @@ pub mod boxes {
             }
             if s.to_ascii_lowercase().ends_with(".lnk") {
                 if let Some((target, args)) = shell::read_shortcut(&p) {
+                    let target = match alias {
+                        Some(a) => a.to_real(&target),
+                        None => target,
+                    };
                     let t = target.to_string_lossy().into_owned();
                     if !isolated_core::profile::normalize_path_key(&t).starts_with(&root) || !target.is_file() {
                         continue;

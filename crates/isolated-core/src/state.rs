@@ -148,6 +148,10 @@ impl RunningEntry {
 pub enum Access {
     Read,
     Write,
+    /// Installers in a box may create keys under the user's registry key
+    /// for uninstall entries (`path`). Keys they create are deleted when
+    /// the grant is revoked.
+    RegistryCreate,
 }
 
 /// A recorded ACL grant, written before the grant is applied and removed
