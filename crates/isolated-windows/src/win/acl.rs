@@ -20,7 +20,9 @@ use windows::Win32::Storage::FileSystem::{DELETE, FILE_GENERIC_EXECUTE, FILE_GEN
 fn access_mask(a: Access) -> u32 {
     match a {
         Access::Read => FILE_GENERIC_READ.0 | FILE_GENERIC_EXECUTE.0,
-        Access::Write => FILE_GENERIC_READ.0 | FILE_GENERIC_EXECUTE.0 | FILE_GENERIC_WRITE.0 | DELETE.0,
+        Access::Write | Access::RegistryCreate => {
+            FILE_GENERIC_READ.0 | FILE_GENERIC_EXECUTE.0 | FILE_GENERIC_WRITE.0 | DELETE.0
+        }
     }
 }
 
@@ -94,6 +96,9 @@ fn modify(
 }
 
 pub fn grant(path: &Path, sid: PSID, access: Access) -> Result<(), String> {
+    if access == Access::RegistryCreate {
+        return super::reg::grant_create(&path.to_string_lossy(), sid);
+    }
     modify(path, sid, GRANT_ACCESS, access_mask(access))
 }
 
@@ -145,7 +150,12 @@ pub fn revoke_entry(dirs: &Dirs, entry: &JournalEntry) -> Result<(), String> {
         if still_needed(dirs, &entry.sandbox_id, &entry.sid, &g.path) {
             continue;
         }
-        if let Err(e) = revoke(Path::new(&g.path), sid.0) {
+        let r = if g.access == Access::RegistryCreate {
+            super::reg::revoke_create(&g.path, sid.0)
+        } else {
+            revoke(Path::new(&g.path), sid.0)
+        };
+        if let Err(e) = r {
             first_err.get_or_insert(e);
         }
     }

@@ -1,5 +1,6 @@
-//! The Isolated window: app profiles, the profile editor, running sandboxes,
-//! settings, the update banner, and the "Run with options" dialog.
+//! The Isolated window: app profiles, installed apps (boxes), the profile
+//! editor, running sandboxes, settings, the update banner, and the "Run with
+//! options" dialog.
 //!
 //! The window only opens when users ask for it. Sandboxes are always started
 //! as a separate `isolated.exe run` process, so closing the window never
@@ -8,6 +9,7 @@
 #![forbid(unsafe_code)]
 
 use eframe::egui::{self, Color32, RichText};
+use isolated_core::boxes::{AppBox, BoxApp};
 use isolated_core::profile::{ProfileEntry, ProfileStore};
 use isolated_core::state::{now_unix, RunningEntry};
 use isolated_core::{Clipboard, Dirs, Gap, NetworkMode, Policy, Settings, Severity, Tier};
@@ -28,6 +30,9 @@ pub enum Start {
     EditFor(PathBuf),
     /// The compact "Run in Isolated with options..." dialog for this target.
     Options(PathBuf),
+    /// The installed apps view with the install form filled in for this
+    /// installer.
+    Install(PathBuf),
 }
 
 pub fn run(start: Start) -> Result<(), String> {
@@ -64,6 +69,7 @@ fn file_name(p: &Path) -> String {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum View {
     Apps,
+    Installed,
     Running,
     Settings,
 }
@@ -114,6 +120,19 @@ impl Editor {
     }
 }
 
+/// The "Install an app" form.
+struct InstallForm {
+    installer: String,
+    /// Box to install into; a new box is created if no box has this name.
+    box_name: String,
+    /// Profile for a new box.
+    profile: String,
+    net: bool,
+    /// Close the window once the install starts (opened from the right-click menu).
+    close_after: bool,
+    error: Option<String>,
+}
+
 /// State of the "with options" dialog.
 struct OptionsDialog {
     target: PathBuf,
@@ -138,6 +157,9 @@ struct App {
     status: Option<(String, bool, Instant)>,
     confirm_delete: Option<String>,
     menu_exe: Option<PathBuf>,
+    boxes: Vec<AppBox>,
+    install: Option<InstallForm>,
+    confirm_delete_box: Option<String>,
 }
 
 impl App {
@@ -160,13 +182,23 @@ impl App {
             status: None,
             confirm_delete: None,
             menu_exe: menu::registered_exe(),
+            boxes: Vec::new(),
+            install: None,
+            confirm_delete_box: None,
             dirs,
         };
+        app.boxes = AppBox::list(&app.dirs);
         app.reload_profiles();
         install::refresh_version();
         let _ = isolated_windows::repair(&app.dirs);
         match start {
             Start::Home => {}
+            Start::Install(target) => {
+                app.open_install_form(&target.to_string_lossy(), None);
+                if let Some(f) = app.install.as_mut() {
+                    f.close_after = true;
+                }
+            }
             Start::EditFor(target) => app.edit_for_program(&target),
             Start::Options(target) => {
                 let (base, policy) = app.policy_for(&target);
@@ -309,6 +341,7 @@ impl App {
             .last_refresh
             .is_none_or(|t| t.elapsed() > Duration::from_millis(1000));
         if due {
+            self.boxes = AppBox::list(&self.dirs);
             self.running = isolated_windows::running(&self.dirs)
                 .into_iter()
                 .map(|e| {
@@ -321,7 +354,84 @@ impl App {
     }
 
     fn add_dropped_or_picked(&mut self, path: PathBuf) {
-        self.edit_for_program(&path);
+        let is_msi = path
+            .extension()
+            .and_then(|e| e.to_str())
+            .is_some_and(|e| e.eq_ignore_ascii_case("msi"));
+        if self.view == View::Installed || is_msi {
+            self.open_install_form(&path.to_string_lossy(), None);
+        } else {
+            self.edit_for_program(&path);
+        }
+    }
+
+    /// Opens the install form, into `into` or a new box named after the installer.
+    fn open_install_form(&mut self, installer: &str, into: Option<&str>) {
+        self.view = View::Installed;
+        self.editor = None;
+        let box_name = match into {
+            Some(b) => b.to_string(),
+            None if installer.is_empty() => String::new(),
+            None => isolated_core::boxes::suggest_name(&self.dirs, installer),
+        };
+        self.install = Some(InstallForm {
+            installer: installer.to_string(),
+            box_name,
+            profile: self.settings.default_profile.clone(),
+            net: true,
+            close_after: false,
+            error: None,
+        });
+    }
+
+    fn start_install(&mut self, ctx: &egui::Context) {
+        let Some(f) = self.install.as_mut() else { return };
+        let installer = f.installer.trim().trim_matches('"').to_string();
+        let box_name = f.box_name.trim().to_string();
+        let checked = isolated_core::boxes::check_name(&box_name).and_then(|_| {
+            if Path::new(&installer).is_file() {
+                Ok(())
+            } else {
+                Err("Choose an installer file (.exe or .msi).".to_string())
+            }
+        });
+        if let Err(e) = checked {
+            f.error = Some(e);
+            return;
+        }
+        let mut args: Vec<String> = vec!["box".into(), "install".into(), "--box".into(), box_name.clone()];
+        if !AppBox::exists(&self.dirs, &box_name) {
+            args.push("--profile".into());
+            args.push(f.profile.clone());
+        }
+        args.push(if f.net { "--net" } else { "--no-net" }.into());
+        args.push("--".into());
+        args.push(installer.clone());
+        let refs: Vec<&str> = args.iter().map(String::as_str).collect();
+        match isolated_windows::spawn_self(&refs) {
+            Ok(()) => {
+                let close = f.close_after;
+                self.install = None;
+                self.set_status(
+                    format!(
+                        "Installing {} into box '{box_name}'. A message appears when the installer has finished.",
+                        file_name(Path::new(&installer))
+                    ),
+                    false,
+                );
+                if close {
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                }
+            }
+            Err(e) => f.error = Some(e),
+        }
+    }
+
+    fn run_box_app(&mut self, b: &AppBox, a: &BoxApp) {
+        match isolated_windows::spawn_self(&["box", "run", &b.name, &a.path]) {
+            Ok(()) => self.set_status(format!("Started {} from box '{}'.", a.name, b.name), false),
+            Err(e) => self.set_status(e, true),
+        }
     }
 }
 
@@ -346,6 +456,7 @@ impl eframe::App for App {
                 ui.add_space(16.0);
                 for (v, label) in [
                     (View::Apps, "Apps"),
+                    (View::Installed, "Installed apps"),
                     (View::Running, "Running"),
                     (View::Settings, "Settings"),
                 ] {
@@ -394,6 +505,7 @@ impl eframe::App for App {
                 }
                 match self.view {
                     View::Apps => self.apps_ui(ui),
+                    View::Installed => self.installed_ui(ui, &ctx),
                     View::Running => self.running_ui(ui),
                     View::Settings => self.settings_ui(ui, &ctx),
                 }
@@ -606,6 +718,249 @@ impl App {
                     self.editor = Some(Editor::new(p, None));
                 }
             });
+    }
+
+    fn installed_ui(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
+        ui.add_space(6.0);
+        ui.horizontal(|ui| {
+            ui.heading("Installed apps");
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui.button("Install an app...").clicked() {
+                    if let Some(p) = shell::pick_installer() {
+                        self.open_install_form(&p.to_string_lossy(), None);
+                    }
+                }
+            });
+        });
+        ui.label(weak(
+            ui,
+            "Run an installer inside a box: a sandbox that keeps its files, so the installed app stays there and can be started again later. Right-click an installer and choose Install in Isolated, or drop one here.",
+        ));
+        ui.add_space(8.0);
+
+        if self.install.is_some() {
+            self.install_form_ui(ui, ctx);
+            ui.add_space(8.0);
+        }
+
+        if self.boxes.is_empty() && self.install.is_none() {
+            ui.label("No installed apps yet.");
+        }
+        let running: Vec<String> = self.running.iter().map(|(e, _)| e.container.clone()).collect();
+        let mut run: Option<(AppBox, BoxApp)> = None;
+        let mut forget: Option<(String, String)> = None;
+        let mut install_into: Option<String> = None;
+        let mut add_to: Option<String> = None;
+        let mut open_folder: Option<String> = None;
+        let mut delete: Option<String> = None;
+        for b in &self.boxes {
+            let in_use = running.contains(&isolated_windows::boxes::container_name(&b.name));
+            egui::Frame::group(ui.style()).show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new(&b.name).strong());
+                    let profile = format!("profile {}", b.profile);
+                    ui.label(weak(ui, profile).small());
+                    if in_use {
+                        ui.label(RichText::new("running").small().color(Color32::from_rgb(80, 160, 90)));
+                    }
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui.small_button("Delete box").clicked() {
+                            self.confirm_delete_box = Some(b.name.clone());
+                        }
+                        if ui.small_button("Open folder").clicked() {
+                            open_folder = Some(b.name.clone());
+                        }
+                        if ui
+                            .small_button("Add program...")
+                            .on_hover_text("Save a program that is inside this box")
+                            .clicked()
+                        {
+                            add_to = Some(b.name.clone());
+                        }
+                        if ui.small_button("Install another app here...").clicked() {
+                            install_into = Some(b.name.clone());
+                        }
+                    });
+                });
+                if b.apps.is_empty() {
+                    ui.label(weak(ui, "No apps saved in this box yet."));
+                }
+                for a in &b.apps {
+                    ui.horizontal(|ui| {
+                        if ui.button("Run").clicked() {
+                            run = Some((b.clone(), a.clone()));
+                        }
+                        ui.label(&a.name).on_hover_text(&a.path);
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if ui
+                                .small_button("Remove")
+                                .on_hover_text("Remove from this list. The app's files stay in the box.")
+                                .clicked()
+                            {
+                                forget = Some((b.name.clone(), a.path.clone()));
+                            }
+                        });
+                    });
+                }
+                if self.confirm_delete_box.as_deref() == Some(b.name.as_str()) {
+                    ui.horizontal_wrapped(|ui| {
+                        ui.label(format!(
+                            "Delete box '{}' and everything installed in it, including the apps' settings and files?",
+                            b.name
+                        ));
+                        if ui.button("Delete box").clicked() {
+                            delete = Some(b.name.clone());
+                        }
+                        if ui.button("Keep").clicked() {
+                            self.confirm_delete_box = None;
+                        }
+                    });
+                }
+            });
+            ui.add_space(4.0);
+        }
+
+        if let Some((b, a)) = run {
+            self.run_box_app(&b, &a);
+        }
+        if let Some((name, path)) = forget {
+            if let Some(mut b) = AppBox::load(&self.dirs, &name) {
+                b.apps.retain(|a| a.path != path);
+                if let Err(e) = b.save(&self.dirs) {
+                    self.set_status(e, true);
+                }
+            }
+            self.last_refresh = None;
+        }
+        if let Some(name) = install_into {
+            match shell::pick_installer() {
+                Some(p) => self.open_install_form(&p.to_string_lossy(), Some(&name)),
+                None => self.open_install_form("", Some(&name)),
+            }
+        }
+        if let Some(name) = add_to {
+            if let (Some(p), Some(mut b)) = (shell::pick_program(), AppBox::load(&self.dirs, &name)) {
+                let app = BoxApp {
+                    name: p
+                        .file_stem()
+                        .map(|n| n.to_string_lossy().into_owned())
+                        .unwrap_or_else(|| "App".into()),
+                    path: p.to_string_lossy().into_owned(),
+                    args: Vec::new(),
+                };
+                b.add_apps(vec![app]);
+                match b.save(&self.dirs) {
+                    Ok(()) => self.set_status(format!("Saved {} in box '{name}'.", file_name(&p)), false),
+                    Err(e) => self.set_status(e, true),
+                }
+                self.last_refresh = None;
+            }
+        }
+        if let Some(name) = open_folder {
+            let policy = self
+                .boxes
+                .iter()
+                .find(|b| b.name == name)
+                .and_then(|b| self.store.load(&b.profile).ok())
+                .unwrap_or_default();
+            match isolated_windows::boxes::folder(&policy, &name) {
+                Ok(f) => shell::open(&f.to_string_lossy()),
+                Err(e) => self.set_status(e, true),
+            }
+        }
+        if let Some(name) = delete {
+            self.confirm_delete_box = None;
+            match isolated_windows::boxes::remove(&self.dirs, &name) {
+                Ok(()) => self.set_status(format!("Deleted box '{name}'."), false),
+                Err(e) => self.set_status(e, true),
+            }
+            self.last_refresh = None;
+        }
+    }
+
+    fn install_form_ui(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
+        let mut names: Vec<String> = self.builtin.iter().map(|e| e.policy.name.clone()).collect();
+        names.extend(self.user.iter().map(|e| e.policy.name.clone()));
+        let box_names: Vec<String> = self.boxes.iter().map(|b| b.name.clone()).collect();
+        let mut go = false;
+        let mut cancel = false;
+        let f = self.install.as_mut().unwrap();
+        egui::Frame::group(ui.style()).show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.label(RichText::new("Install an app").strong());
+            ui.add_space(4.0);
+            egui::Grid::new("install_form")
+                .num_columns(2)
+                .spacing([12.0, 6.0])
+                .show(ui, |ui| {
+                    ui.label("Installer");
+                    ui.horizontal(|ui| {
+                        ui.add(egui::TextEdit::singleline(&mut f.installer).desired_width(340.0));
+                        if ui.button("Browse...").clicked() {
+                            if let Some(p) = shell::pick_installer() {
+                                f.installer = p.to_string_lossy().into_owned();
+                            }
+                        }
+                    });
+                    ui.end_row();
+                    ui.label("Box");
+                    ui.horizontal(|ui| {
+                        ui.add(egui::TextEdit::singleline(&mut f.box_name).desired_width(200.0));
+                        if !box_names.is_empty() {
+                            egui::ComboBox::from_id_salt("box_pick")
+                                .selected_text("Existing box")
+                                .show_ui(ui, |ui| {
+                                    for n in &box_names {
+                                        if ui.selectable_label(f.box_name == *n, n).clicked() {
+                                            f.box_name = n.clone();
+                                        }
+                                    }
+                                });
+                        }
+                    });
+                    ui.end_row();
+                    let existing = box_names.iter().any(|n| n.eq_ignore_ascii_case(f.box_name.trim()));
+                    ui.label("Profile");
+                    if existing {
+                        ui.label(weak(ui, "Uses the box's profile"));
+                    } else {
+                        egui::ComboBox::from_id_salt("install_profile")
+                            .selected_text(&f.profile)
+                            .show_ui(ui, |ui| {
+                                for n in &names {
+                                    ui.selectable_value(&mut f.profile, n.clone(), n);
+                                }
+                            });
+                    }
+                    ui.end_row();
+                });
+            ui.checkbox(&mut f.net, "Allow internet while installing (many installers download files)");
+            ui.label(weak(
+                ui,
+                "The installer runs without administrator rights and installs into the box only. Apps installed later in the same box can see each other.",
+            ).small());
+            if let Some(e) = &f.error {
+                ui.label(RichText::new(e).color(Color32::from_rgb(220, 80, 70)));
+            }
+            ui.horizontal(|ui| {
+                if ui.button(RichText::new("Install").strong()).clicked() {
+                    go = true;
+                }
+                if ui.button("Cancel").clicked() {
+                    cancel = true;
+                }
+            });
+        });
+        if cancel {
+            let close = f.close_after;
+            self.install = None;
+            if close {
+                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            }
+        } else if go {
+            self.start_install(ctx);
+        }
     }
 
     /// Permission controls shared by the editor and the options dialog.

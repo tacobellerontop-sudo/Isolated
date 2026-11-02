@@ -43,6 +43,9 @@ impl Dirs {
     pub fn profiles(&self) -> PathBuf {
         self.config.join("profiles")
     }
+    pub fn boxes(&self) -> PathBuf {
+        self.config.join("boxes")
+    }
     pub fn settings_file(&self) -> PathBuf {
         self.config.join("settings.toml")
     }
@@ -145,6 +148,10 @@ impl RunningEntry {
 pub enum Access {
     Read,
     Write,
+    /// Installers in a box may create keys under the user's registry key
+    /// for uninstall entries (`path`). Keys they create are deleted when
+    /// the grant is revoked.
+    RegistryCreate,
 }
 
 /// A recorded ACL grant, written before the grant is applied and removed

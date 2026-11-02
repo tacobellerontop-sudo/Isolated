@@ -5,7 +5,8 @@ use windows::core::PWSTR;
 use windows::Win32::Foundation::{LocalFree, ERROR_ALREADY_EXISTS, HLOCAL};
 use windows::Win32::Security::Authorization::ConvertSidToStringSidW;
 use windows::Win32::Security::Isolation::{
-    CreateAppContainerProfile, DeriveAppContainerSidFromAppContainerName, GetAppContainerFolderPath,
+    CreateAppContainerProfile, DeleteAppContainerProfile, DeriveAppContainerSidFromAppContainerName,
+    GetAppContainerFolderPath,
 };
 use windows::Win32::Security::{DeriveCapabilitySidsFromName, FreeSid, PSID};
 use windows::Win32::System::Com::CoTaskMemFree;
@@ -125,4 +126,26 @@ pub fn container_name(profile: &str, program_key: &str) -> String {
         clean,
         isolated_core::state::stable_hash(program_key)
     )
+}
+
+/// Identity of an app box: fixed per box, so its folders persist across
+/// runs whatever program is started in it.
+pub fn box_container_name(box_name: &str) -> String {
+    let clean: String = box_name
+        .trim()
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+        .take(24)
+        .collect();
+    format!(
+        "Isolated.box.{}.{:08x}",
+        clean,
+        isolated_core::state::stable_hash(&box_name.trim().to_lowercase()) as u32
+    )
+}
+
+/// Deletes an AppContainer profile and its storage folder.
+pub fn delete(name: &str) -> Result<(), String> {
+    let w = Wide::new(name);
+    unsafe { DeleteAppContainerProfile(w.pcwstr()) }.map_err(|e| err("could not remove the box's storage", e))
 }

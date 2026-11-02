@@ -25,6 +25,7 @@ Set-Content -Path $secret -Value "do not read me"
 
 & $Exe --version | Out-Host
 
+
 # 1. Files outside the sandbox are not readable.
 $code = Run-Sandboxed @("run", "--", $cmd, "/d", "/c", "type `"$secret`"")
 Check "user files are hidden by default (exit $code)" ($code -ne 0)
@@ -60,6 +61,87 @@ Check "network works when allowed (exit $code)" (($code -eq 0) -and (Test-Path $
 # 7. Child processes stay in the sandbox: a grandchild can't read the secret either.
 $code = Run-Sandboxed @("run", "--", $cmd, "/d", "/c", "$cmd /d /c type `"$secret`"")
 Check "child processes inherit the sandbox (exit $code)" ($code -ne 0)
+
+# 9. The sandbox's LocalAppData exists and is writable (Windows moves it for
+#    AppContainers; installers and apps rely on it).
+$code = Run-Sandboxed @("run", "--rw", $secretDir, "--", $cmd, "/d", "/c", "echo %LOCALAPPDATA%> `"$secretDir\lad.txt`" & echo x> `"%LOCALAPPDATA%\probe.txt`"")
+Write-Host "LOCALAPPDATA in sandbox: $(Get-Content "$secretDir\lad.txt" -ErrorAction SilentlyContinue)"
+Check "LocalAppData inside the sandbox is writable (exit $code)" ($code -eq 0)
+
+# 10. Installing into a box keeps the app, and it runs again later.
+$boxesDir = Join-Path $env:APPDATA "Isolated\boxes"
+$instDir = Join-Path $env:RUNNER_TEMP "isolated-installers"
+if (-not $env:RUNNER_TEMP) { $instDir = Join-Path $env:TEMP "isolated-installers" }
+New-Item -ItemType Directory -Force -Path $instDir | Out-Null
+$fake = Join-Path $instDir "fake-setup.cmd"
+Set-Content -Path $fake -Value "@echo off`r`nmkdir `"%LOCALAPPDATA%\Programs\Fake`"`r`ncopy /y `"%SystemRoot%\System32\cmd.exe`" `"%LOCALAPPDATA%\Programs\Fake\fake.exe`"`r`n"
+$code = Run-Sandboxed @("box", "install", "--no-net", "--box", "SmokeFake", "--", $fake)
+$boxFile = Join-Path $boxesDir "SmokeFake.toml"
+$boxText = (Get-Content $boxFile -Raw -ErrorAction SilentlyContinue)
+Write-Host $boxText
+Check "script installer saved its app in the box (exit $code)" (($code -eq 0) -and ($boxText -match "fake\.exe"))
+$code = Run-Sandboxed @("box", "run", "SmokeFake", "fake", "/d", "/c", "exit 7")
+Check "saved app runs from the box later (exit $code)" ($code -eq 7)
+$code = Run-Sandboxed @("box", "run", "SmokeFake", "fake", "/d", "/c", "type `"$secret`"")
+Check "apps in a box still can't read user files (exit $code)" ($code -ne 0)
+$code = Run-Sandboxed @("box", "delete", "SmokeFake")
+$left = @(Get-ChildItem -Path (Join-Path $env:LOCALAPPDATA "Packages") -Filter "isolated.box.SmokeFake*" -ErrorAction SilentlyContinue).Count
+Check "deleting a box removes it and its files (exit $code, $left left)" (($code -eq 0) -and -not (Test-Path $boxFile) -and ($left -eq 0))
+
+# 11. A real Inno Setup installer that asks for admin rights installs per-user
+#     into a box, with its Start menu shortcut found.
+$iscc = @("${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe", "$env:ProgramFiles\Inno Setup 6\ISCC.exe") | Where-Object { Test-Path $_ } | Select-Object -First 1
+if (-not $iscc -and (Get-Command choco -ErrorAction SilentlyContinue)) {
+    choco install innosetup -y --no-progress | Out-Null
+    $iscc = @("${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe", "$env:ProgramFiles\Inno Setup 6\ISCC.exe") | Where-Object { Test-Path $_ } | Select-Object -First 1
+}
+if ($iscc) {
+    $iss = Join-Path $instDir "hello.iss"
+    Set-Content -Path $iss -Value @"
+[Setup]
+AppName=Hello Smoke
+AppVersion=1.0
+DefaultDirName={autopf}\HelloSmoke
+DefaultGroupName=Hello Smoke
+PrivilegesRequired=admin
+PrivilegesRequiredOverridesAllowed=commandline dialog
+OutputDir=$instDir
+OutputBaseFilename=HelloSmokeSetup
+DisableProgramGroupPage=yes
+[Files]
+Source: "$env:SystemRoot\System32\cmd.exe"; DestDir: "{app}"; DestName: "hello.exe"
+[Icons]
+Name: "{autoprograms}\Hello Smoke"; Filename: "{app}\hello.exe"
+Name: "{autoprograms}\Uninstall Hello Smoke"; Filename: "{uninstallexe}"
+"@
+    & $iscc /Q $iss | Out-Host
+    $setup = Join-Path $instDir "HelloSmokeSetup.exe"
+    $code = Run-Sandboxed @("box", "install", "--no-net", "--box", "HelloSmoke", "--", $setup, "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/LOG")
+    $boxFile = Join-Path $boxesDir "HelloSmoke.toml"
+    $boxText = (Get-Content $boxFile -Raw -ErrorAction SilentlyContinue)
+    Write-Host $boxText
+    $ok = ($code -eq 0) -and ($boxText -match "Hello Smoke") -and ($boxText -match "hello\.exe")
+    Check "Inno Setup installer installs into a box (exit $code)" $ok
+    if (-not $ok) {
+        Get-ChildItem -Path (Join-Path $env:LOCALAPPDATA "Packages") -Filter "isolated.box.HelloSmoke*" -ErrorAction SilentlyContinue |
+            ForEach-Object { Get-ChildItem -Recurse -Path $_.FullName -Filter "Setup Log*.txt" -ErrorAction SilentlyContinue } |
+            ForEach-Object { Write-Host "--- $($_.FullName)"; Get-Content $_.FullName | Out-Host }
+        Get-ChildItem -Path (Join-Path $env:LOCALAPPDATA "Packages") -Filter "isolated.box.HelloSmoke*" -ErrorAction SilentlyContinue |
+            ForEach-Object { Get-ChildItem -Recurse -File -Path $_.FullName -ErrorAction SilentlyContinue } |
+            ForEach-Object { Write-Host "  file $($_.FullName)" }
+    }
+    $code = Run-Sandboxed @("box", "run", "HelloSmoke", "`"Hello Smoke`"", "/d", "/c", "exit 5")
+    Check "Inno-installed app runs from its shortcut entry (exit $code)" ($code -eq 5)
+    $uninst = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall"
+    Check "installer's uninstall entry is removed afterwards" (-not (Test-Path "$uninst\Hello Smoke_is1"))
+    $regAcl = (Get-Acl $uninst).Access | Where-Object { $_.IdentityReference.Value -match "S-1-15-2-" }
+    Check "registry grant is removed afterwards" (-not $regAcl)
+    $drives = (Get-PSDrive -PSProvider FileSystem).Root -join " "
+    Check "temporary drive letter is removed ($drives)" (-not ((subst) -match "isolated.box"))
+    Run-Sandboxed @("box", "delete", "HelloSmoke") | Out-Null
+} else {
+    Write-Host "SKIP  Inno Setup is not available on this machine"
+}
 
 # 8. Right-click menu registers and unregisters.
 & $Exe register | Out-Null
