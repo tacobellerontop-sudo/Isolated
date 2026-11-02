@@ -58,10 +58,18 @@ so they still cannot see your files. Each box keeps its own files and
 settings; apps installed into the same box can see each other. Deleting a
 box removes everything installed in it.
 
-Most installers can install for one user and work this way, including
-Inno Setup, NSIS, per-user MSI, and Squirrel (Electron) installers.
+Installers that can install for one user work this way. Inno Setup
+installers are tested on every build; NSIS and Squirrel (Electron)
+installers are expected to work, and `.msi` files are tried as a per-user
+install but may fail because Windows Installer runs as a system service.
 Installers that must change Windows itself, such as drivers, services and
 system-wide runtimes, cannot run in a sandbox.
+
+While an installer runs, Isolated briefly maps a spare drive letter to the
+box (some installers check the drive's root, which a sandbox cannot read)
+and lets the installer add its entry under the user's list of uninstallable
+apps. Both are removed when the installer finishes, so a box's uninstaller
+never runs outside the sandbox.
 
 **From a terminal:**
 
