@@ -763,7 +763,16 @@ pub fn launch(dirs: &Dirs, policy: &Policy, req: &LaunchRequest) -> Result<Runni
                     &mut pi,
                 )
             };
-            created.map_err(|e| err(&format!("could not start {}", prepared.program.display()), e))?;
+            created.map_err(|e| {
+                if e.code() == windows::Win32::Foundation::ERROR_ELEVATION_REQUIRED.to_hresult() {
+                    format!(
+                        "{} asks for administrator rights, which a sandbox cannot give. If it is an installer, right-click it and choose Install in Isolated.",
+                        file_name_of(&prepared.program)
+                    )
+                } else {
+                    err(&format!("could not start {}", prepared.program.display()), e)
+                }
+            })?;
             drop(OwnedHandle(pi.hThread));
             Ok((OwnedHandle(pi.hProcess), pi.dwProcessId))
         }
@@ -790,6 +799,12 @@ pub fn launch(dirs: &Dirs, policy: &Policy, req: &LaunchRequest) -> Result<Runni
         dirs: dirs.clone(),
         journal,
     })
+}
+
+fn file_name_of(p: &Path) -> String {
+    p.file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| p.display().to_string())
 }
 
 /// Private folder of a compatible-tier sandbox. Low-integrity processes can

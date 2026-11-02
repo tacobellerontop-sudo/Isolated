@@ -329,9 +329,14 @@ Known challenges and how the plan handles them:
   "compatible" tier that uses a restricted token + low integrity + Job Object
   without AppContainer, clearly labeled in the GUI as weaker. Built-in profiles
   record which tier each common app needs.
-- **Installers that need admin.** Out of scope for v1; the GUI explains that
-  elevated programs cannot be sandboxed and suggests extracting or using
-  portable versions.
+- **Installers that need admin.** Since v0.2, installers run inside an *app
+  box*: a sandbox whose folders are kept. The installer starts without admin
+  rights (`RunAsInvoker`), Inno Setup and NSIS installers are asked to install
+  for the current user into the box, and `.msi` files go through per-user
+  `msiexec`. Afterwards the shortcuts and programs the installer created are
+  saved in the box so users can start them again. Installers that truly need
+  admin (drivers, services, system-wide components) still cannot be
+  sandboxed, and the GUI says so.
 - **ACL leftovers after a crash.** The cleanup journal is replayed on the next
   launch of `isolated.exe`; a "Repair" button in the GUI does the same on
   demand.

@@ -7,6 +7,8 @@ Isolated starts the program with nothing: no access to your files, no
 network, no clipboard. You grant only what it needs.
 
 - **Right-click → Run in Isolated** on any `.exe`, shortcut, `.bat`, `.cmd` or `.ps1`.
+- **Install apps into a box:** run an installer in a sandbox that keeps its
+  files, then start the installed app from the box whenever you like.
 - **Small and quiet:** one ~4 MB exe, no installer framework, no background
   service, nothing running when no sandbox is.
 - **No admin rights:** uses Windows AppContainer, Job Objects and per-user
@@ -39,10 +41,27 @@ entry is under **Show more options**. The submenu has:
 | Run in Isolated (offline) | Same, but with no network for this run |
 | Run in Isolated with options... | Pick permissions in a small dialog first |
 | Edit Isolated profile... | Save permissions for this app |
+| Install in Isolated... | Install this app into a box (programs and `.msi` files) |
 
 **The Isolated window** (Start menu) lists app profiles, shows running
 sandboxes with a Stop button, and holds settings. Drop a program on it to
 create a profile.
+
+**Installed apps.** To keep an app instead of running it once, right-click
+its installer and choose **Install in Isolated...**, or use **Install an
+app...** in the window's **Installed apps** tab. Pick a box (a new one is
+named after the app) and whether the installer may use the internet. The
+installer runs inside the box without administrator rights, and when it
+finishes, Isolated saves the programs it created. They appear under
+**Installed apps** with a **Run** button, and run with the box's profile,
+so they still cannot see your files. Each box keeps its own files and
+settings; apps installed into the same box can see each other. Deleting a
+box removes everything installed in it.
+
+Most installers can install for one user and work this way, including
+Inno Setup, NSIS, per-user MSI, and Squirrel (Electron) installers.
+Installers that must change Windows itself, such as drivers, services and
+system-wide runtimes, cannot run in a sandbox.
 
 **From a terminal:**
 
@@ -50,6 +69,9 @@ create a profile.
 isolated run --no-net -- .\suspicious.exe
 isolated run --ro "$HOME\Documents\input" --rw "$HOME\Documents\output" -- converter.exe
 isolated run --profile game-mod -- .\launcher.exe
+isolated box install --box Editor -- .\EditorSetup.exe
+isolated box list
+isolated box run Editor "Editor"
 isolated ps
 isolated kill <id>
 isolated update

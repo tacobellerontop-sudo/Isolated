@@ -64,7 +64,8 @@ Check "child processes inherit the sandbox (exit $code)" ($code -ne 0)
 
 # 9. The sandbox's LocalAppData exists and is writable (Windows moves it for
 #    AppContainers; installers and apps rely on it).
-$code = Run-Sandboxed @("run", "--", $cmd, "/d", "/c", "if not exist `"%LOCALAPPDATA%`" exit 3 & echo x> `"%LOCALAPPDATA%\probe.txt`"")
+$code = Run-Sandboxed @("run", "--rw", $secretDir, "--", $cmd, "/d", "/c", "echo %LOCALAPPDATA%> `"$secretDir\lad.txt`" & echo x> `"%LOCALAPPDATA%\probe.txt`"")
+Write-Host "LOCALAPPDATA in sandbox: $(Get-Content "$secretDir\lad.txt" -ErrorAction SilentlyContinue)"
 Check "LocalAppData inside the sandbox is writable (exit $code)" ($code -eq 0)
 
 # 10. Installing into a box keeps the app, and it runs again later.
@@ -115,7 +116,7 @@ Name: "{autoprograms}\Uninstall Hello Smoke"; Filename: "{uninstallexe}"
 "@
     & $iscc /Q $iss | Out-Host
     $setup = Join-Path $instDir "HelloSmokeSetup.exe"
-    $code = Run-Sandboxed @("box", "install", "--no-net", "--box", "HelloSmoke", "--", $setup, "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART")
+    $code = Run-Sandboxed @("box", "install", "--no-net", "--box", "HelloSmoke", "--", $setup, "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/LOG")
     $boxFile = Join-Path $boxesDir "HelloSmoke.toml"
     $boxText = (Get-Content $boxFile -Raw -ErrorAction SilentlyContinue)
     Write-Host $boxText
@@ -125,6 +126,9 @@ Name: "{autoprograms}\Uninstall Hello Smoke"; Filename: "{uninstallexe}"
         Get-ChildItem -Path (Join-Path $env:LOCALAPPDATA "Packages") -Filter "isolated.box.HelloSmoke*" -ErrorAction SilentlyContinue |
             ForEach-Object { Get-ChildItem -Recurse -Path $_.FullName -Filter "Setup Log*.txt" -ErrorAction SilentlyContinue } |
             ForEach-Object { Write-Host "--- $($_.FullName)"; Get-Content $_.FullName | Out-Host }
+        Get-ChildItem -Path (Join-Path $env:LOCALAPPDATA "Packages") -Filter "isolated.box.HelloSmoke*" -ErrorAction SilentlyContinue |
+            ForEach-Object { Get-ChildItem -Recurse -File -Path $_.FullName -ErrorAction SilentlyContinue } |
+            ForEach-Object { Write-Host "  file $($_.FullName)" }
     }
     $code = Run-Sandboxed @("box", "run", "HelloSmoke", "`"Hello Smoke`"", "/d", "/c", "exit 5")
     Check "Inno-installed app runs from its shortcut entry (exit $code)" ($code -eq 5)
