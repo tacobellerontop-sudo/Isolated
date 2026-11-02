@@ -4,6 +4,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod boxes;
 pub mod cmdline;
 pub mod policy;
 pub mod profile;

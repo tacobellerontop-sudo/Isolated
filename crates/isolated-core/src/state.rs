@@ -43,6 +43,9 @@ impl Dirs {
     pub fn profiles(&self) -> PathBuf {
         self.config.join("profiles")
     }
+    pub fn boxes(&self) -> PathBuf {
+        self.config.join("boxes")
+    }
     pub fn settings_file(&self) -> PathBuf {
         self.config.join("settings.toml")
     }

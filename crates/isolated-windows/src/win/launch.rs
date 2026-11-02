@@ -129,7 +129,7 @@ fn system_dir() -> PathBuf {
         .join("System32")
 }
 
-fn prepare(target: &Path, args: &[String], depth: u32) -> Result<Prepared> {
+fn prepare(target: &Path, args: &[String], depth: u32, installer: bool) -> Result<Prepared> {
     let target = canonical(target)?;
     let ts = target.to_string_lossy().to_string();
     match cmdline::classify(&ts) {
@@ -175,15 +175,30 @@ fn prepare(target: &Path, args: &[String], depth: u32) -> Result<Prepared> {
             }
             let mut all = split_args(&link.arguments);
             all.extend(args.iter().cloned());
-            let mut p = prepare(&link.target, &all, depth + 1)?;
+            let mut p = prepare(&link.target, &all, depth + 1, installer)?;
             if p.workdir.is_none() && !link.workdir.as_os_str().is_empty() {
                 p.workdir = Some(link.workdir);
             }
             Ok(p)
         }
+        TargetKind::Installer if installer && ts.to_ascii_lowercase().ends_with(".msi") => {
+            // Ask Windows Installer for a per-user install.
+            let msiexec = system_dir().join("msiexec.exe");
+            let mut all = vec!["/i".to_string(), ts.clone(), "ALLUSERS=2".into(), "MSIINSTALLPERUSER=1".into()];
+            all.extend(args.iter().cloned());
+            Ok(Prepared {
+                command_line: cmdline::join(&msiexec.to_string_lossy(), &all),
+                application: Some(msiexec),
+                program: target,
+                workdir: None,
+            })
+        }
+        TargetKind::Installer if installer => Err(
+            "Store app packages (.msix, .appx) cannot be installed in a sandbox. Use the app's regular installer (.exe or .msi)."
+                .into(),
+        ),
         TargetKind::Installer => Err(
-            "Installers need administrator rights, and programs running as administrator cannot be sandboxed. \
-             Use a portable version of the app, or extract it first."
+            "This is an installer. Use Install in Isolated instead, which installs the app into a box you can run it from later."
                 .into(),
         ),
         TargetKind::Unsupported => Err(format!(
@@ -194,7 +209,7 @@ fn prepare(target: &Path, args: &[String], depth: u32) -> Result<Prepared> {
 }
 
 /// Splits a shortcut's argument string the way programs usually do.
-fn split_args(s: &str) -> Vec<String> {
+pub fn split_args(s: &str) -> Vec<String> {
     let mut out = Vec::new();
     let mut cur = String::new();
     let mut in_q = false;
@@ -400,7 +415,8 @@ const HOME_ENV: &[&str] = &[
     "OneDrive",
 ];
 
-fn build_env(policy: &Policy, home: Option<&Path>, temp: Option<&Path>) -> Vec<u16> {
+fn build_env(policy: &Policy, home: Option<&Path>, temp: Option<&Path>, installer: bool) -> Vec<u16> {
+    let appcontainer = policy.tier == Tier::Isolated;
     // Keys compare case-insensitively on Windows.
     let mut env: BTreeMap<String, (String, String)> = BTreeMap::new();
     let set = |k: &str, v: String, env: &mut BTreeMap<String, (String, String)>| {
@@ -423,11 +439,14 @@ fn build_env(policy: &Policy, home: Option<&Path>, temp: Option<&Path>) -> Vec<u
         let home = h.to_string_lossy().to_string();
         set("USERPROFILE", home.clone(), &mut env);
         set("APPDATA", h.join(r"AppData\Roaming").to_string_lossy().into(), &mut env);
-        set(
-            "LOCALAPPDATA",
-            h.join(r"AppData\Local").to_string_lossy().into(),
-            &mut env,
-        );
+        // Windows rewrites LOCALAPPDATA for AppContainer processes to
+        // `<value>\Packages\<container>\AC`. Passing the real value makes it
+        // the container's own folder, which exists and is writable.
+        let local = match std::env::var("LOCALAPPDATA").ok().filter(|_| appcontainer) {
+            Some(real) => real,
+            None => h.join(r"AppData\Local").to_string_lossy().into(),
+        };
+        set("LOCALAPPDATA", local, &mut env);
         if home.len() > 2 && home.as_bytes()[1] == b':' {
             set("HOMEDRIVE", home[..2].to_string(), &mut env);
             set("HOMEPATH", home[2..].to_string(), &mut env);
@@ -438,6 +457,11 @@ fn build_env(policy: &Policy, home: Option<&Path>, temp: Option<&Path>) -> Vec<u
         set("TMP", p.to_string_lossy().into(), &mut env);
     }
     set("ISOLATED_SANDBOX", "1".into(), &mut env);
+    if installer {
+        // Start installers that ask for administrator rights without them;
+        // most then install for the current user only.
+        set("__COMPAT_LAYER", "RunAsInvoker".into(), &mut env);
+    }
     for (k, v) in &policy.env.set {
         set(k, v.clone(), &mut env);
     }
@@ -460,8 +484,11 @@ fn make_private_dirs(base: &Path, with_home: bool) -> Result<PrivateDirs> {
     let temp = base.join("Temp");
     let mut dirs = vec![temp.clone()];
     if with_home {
-        dirs.push(home.join(r"AppData\Roaming"));
-        dirs.push(home.join(r"AppData\Local"));
+        // Start menu and Programs folders exist up front so installers that
+        // look them up find them inside the sandbox.
+        dirs.push(home.join(r"AppData\Roaming\Microsoft\Windows\Start Menu\Programs"));
+        dirs.push(home.join(r"AppData\Local\Programs"));
+        dirs.push(base.join("Programs"));
         dirs.push(home.join("Documents"));
         dirs.push(home.join("Downloads"));
         dirs.push(home.join("Desktop"));
@@ -570,11 +597,20 @@ pub fn launch(dirs: &Dirs, policy: &Policy, req: &LaunchRequest) -> Result<Runni
         ));
     }
 
-    let prepared = prepare(&req.target, &req.args, 0)?;
+    let mut prepared = prepare(&req.target, &req.args, 0, req.installer)?;
+    if !req.raw_tail.is_empty() {
+        prepared.command_line.push(' ');
+        prepared.command_line.push_str(&req.raw_tail);
+    }
     let program_key = normalize_path_key(&prepared.program.to_string_lossy());
     let id = new_sandbox_id();
     let job_name = format!("Local\\Isolated-{id}");
-    let container_name = appcontainer::container_name(&req.profile_name, &program_key);
+    let container_name = match &req.app_box {
+        Some(b) => appcontainer::box_container_name(b),
+        None => appcontainer::container_name(&req.profile_name, &program_key),
+    };
+    // A box always keeps its own user folders: that is where apps install.
+    let private_home = policy.filesystem.private_home || req.app_box.is_some();
 
     // Identity, grants and private folders.
     let mut container: Option<ContainerSid> = None;
@@ -596,8 +632,12 @@ pub fn launch(dirs: &Dirs, policy: &Policy, req: &LaunchRequest) -> Result<Runni
                 caps.add("webcam")?;
             }
             let base = c.folder()?;
-            private = Some(make_private_dirs(&base, policy.filesystem.private_home)?);
-            let grants = grants_for(policy, &prepared.program)?;
+            private = Some(make_private_dirs(&base, private_home)?);
+            // The container already owns its folder; never grant inside it.
+            let grants: Vec<Grant> = grants_for(policy, &prepared.program)?
+                .into_iter()
+                .filter(|g| !under(Path::new(&g.path), &base))
+                .collect();
             if !grants.is_empty() {
                 let entry = JournalEntry {
                     sandbox_id: id.clone(),
@@ -620,11 +660,8 @@ pub fn launch(dirs: &Dirs, policy: &Policy, req: &LaunchRequest) -> Result<Runni
         }
         Tier::Compatible => {
             // Low-integrity processes can write only to LocalLow.
-            let base = shell::known_folder(shell::KnownFolder::LocalAppDataLow)
-                .ok_or("could not find the LocalLow folder")?
-                .join("Isolated")
-                .join(&container_name);
-            private = Some(make_private_dirs(&base, policy.filesystem.private_home)?);
+            let base = compatible_base(&container_name)?;
+            private = Some(make_private_dirs(&base, private_home)?);
         }
     }
 
@@ -635,11 +672,12 @@ pub fn launch(dirs: &Dirs, policy: &Policy, req: &LaunchRequest) -> Result<Runni
         e
     };
 
-    let home = private
-        .as_ref()
-        .filter(|_| policy.filesystem.private_home)
-        .map(|p| p.home.as_path());
-    let env = build_env(policy, home, private.as_ref().map(|p| p.temp.as_path()));
+    let home = private.as_ref().filter(|_| private_home).map(|p| p.home.as_path());
+    let env = build_env(policy, home, private.as_ref().map(|p| p.temp.as_path()), req.installer);
+    if req.installer {
+        // Also set here: some Windows versions read it from the caller.
+        std::env::set_var("__COMPAT_LAYER", "RunAsInvoker");
+    }
 
     let job = Job::create(&job_name, policy).map_err(cleanup_on_error)?;
 
@@ -752,6 +790,45 @@ pub fn launch(dirs: &Dirs, policy: &Policy, req: &LaunchRequest) -> Result<Runni
         dirs: dirs.clone(),
         journal,
     })
+}
+
+/// Private folder of a compatible-tier sandbox. Low-integrity processes can
+/// write only under LocalLow.
+pub fn compatible_base(container_name: &str) -> Result<PathBuf> {
+    Ok(shell::known_folder(shell::KnownFolder::LocalAppDataLow)
+        .ok_or("could not find the LocalLow folder")?
+        .join("Isolated")
+        .join(container_name))
+}
+
+/// The base folder of a box for a policy's tier, created if needed. Its
+/// `Home` subfolder is the user folder apps inside the box see.
+pub fn box_folder(policy: &Policy, box_name: &str) -> Result<PathBuf> {
+    let name = appcontainer::box_container_name(box_name);
+    let base = match policy.tier {
+        Tier::Isolated => appcontainer::create_or_open(&name, &format!("Isolated box: {box_name}"))?.folder()?,
+        Tier::Compatible => compatible_base(&name)?,
+    };
+    make_private_dirs(&base, true)?;
+    Ok(base)
+}
+
+/// The folder an installer is asked to use inside a box: the
+/// `%LOCALAPPDATA%\Programs\<name>` that programs inside the box see.
+pub fn box_install_dir(policy: &Policy, base: &Path, app: &str) -> PathBuf {
+    match policy.tier {
+        Tier::Isolated => base.join("Programs").join(app),
+        Tier::Compatible => base.join(r"Home\AppData\Local\Programs").join(app),
+    }
+}
+
+/// Removes a box's folders and sandbox identity.
+pub fn delete_box(box_name: &str) -> Result<()> {
+    let name = appcontainer::box_container_name(box_name);
+    if let Ok(base) = compatible_base(&name) {
+        let _ = std::fs::remove_dir_all(base);
+    }
+    appcontainer::delete(&name)
 }
 
 /// A copy of this process's token with every privilege removed and the

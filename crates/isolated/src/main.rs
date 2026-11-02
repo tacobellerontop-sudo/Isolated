@@ -6,6 +6,7 @@
 #![cfg_attr(windows, windows_subsystem = "windows")]
 #![forbid(unsafe_code)]
 
+use isolated_core::boxes::{AppBox, BoxApp};
 use isolated_core::profile::{ProfileStore, DEFAULT_PROFILE};
 use isolated_core::state::RunningEntry;
 use isolated_core::{Dirs, NetworkMode, Overrides, Policy, Settings, Severity, Tier};
@@ -24,6 +25,16 @@ Usage:
   isolated run [options] [--] <program> [args...]
                                         Run a program, shortcut or script in a sandbox
   isolated options <program>            Choose permissions in a dialog, then run
+  isolated box install [options] [<box>] -- <installer> [args...]
+                                        Install an app into a box (a sandbox that keeps its files)
+  isolated box run <box> <app> [args...]
+                                        Start an app saved in a box (by name or path)
+  isolated box options <installer>      Choose the box and network in a dialog, then install
+  isolated box list                     List boxes and their apps
+  isolated box add <box> <program> [--name <name>]
+                                        Save a program inside a box as an app
+  isolated box forget <box> <app>       Remove an app from a box's list (files are kept)
+  isolated box delete <box>             Delete a box and everything installed in it
   isolated ps                           List running sandboxes
   isolated kill <id>                    Stop a sandbox and everything it started
   isolated profile list                 List profiles
@@ -47,6 +58,11 @@ Run options:
   --compatible            Use the weaker compatible tier
   --accept-weaker         Run even if the sandbox would be weaker than the profile asks
   --verbose               Print notes about the sandbox
+
+Box install options:
+  --profile <name>        Profile for a new box (default: the default profile)
+  --net / --no-net        Allow or block internet while installing (default: allowed)
+  --accept-weaker         Install even if the sandbox would be weaker than the profile asks
 ";
 
 /// Where messages go: the terminal if we were started from one, otherwise
@@ -124,6 +140,7 @@ fn dispatch(args: Vec<OsString>, out: &Out) -> Result<ExitCode, String> {
             let target = single_path(&mut parser)?;
             Ok(gui(isolated_gui::Start::Options(target)))
         }
+        "box" | "boxes" => app_box(parser, &dirs, out),
         "ps" | "list" => ps(&dirs, out),
         "kill" | "stop" => {
             let id = single_value(&mut parser, "a sandbox id")?;
@@ -350,6 +367,9 @@ fn run(mut parser: lexopt::Parser, dirs: &Dirs, out: &Out) -> Result<ExitCode, S
         target: target.clone(),
         args,
         accept_weaker,
+        app_box: None,
+        installer: false,
+        raw_tail: String::new(),
     };
     let sandbox = isolated_windows::launch(dirs, &policy, &req)?;
     out.info(&format!(
@@ -436,4 +456,347 @@ fn profile(mut parser: lexopt::Parser, dirs: &Dirs, out: &Out) -> Result<ExitCod
         }
         other => Err(format!("unknown profile command '{other}'")),
     }
+}
+
+/// Asks about (or refuses) a sandbox weaker than the profile. Returns
+/// `Ok(false)` if users said no.
+fn accept_gaps(policy: &Policy, accept_weaker: &mut bool, out: &Out) -> Result<bool, String> {
+    let gaps = isolated_windows::gaps(policy);
+    let weaker: Vec<&str> = gaps
+        .iter()
+        .filter(|g| g.severity == Severity::Weaker)
+        .map(|g| g.message.as_str())
+        .collect();
+    if weaker.is_empty() || *accept_weaker {
+        return Ok(true);
+    }
+    let list = weaker.join("\n");
+    if out.console {
+        return Err(format!(
+            "the sandbox would be weaker than profile '{}' asks:\n{list}\nRun again with --accept-weaker to continue.",
+            policy.name
+        ));
+    }
+    if !shell::confirm(
+        "Isolated",
+        &format!(
+            "The sandbox would be weaker than profile '{}' asks:\n\n{list}\n\nContinue anyway?",
+            policy.name
+        ),
+    ) {
+        return Ok(false);
+    }
+    *accept_weaker = true;
+    Ok(true)
+}
+
+/// The policy a box runs with: its profile, always with private folders.
+fn box_policy(store: &ProfileStore, b: &AppBox) -> Result<Policy, String> {
+    let mut policy = store
+        .load(&b.profile)
+        .map_err(|e| format!("box '{}' uses profile '{}': {e}", b.name, b.profile))?;
+    policy.filesystem.private_home = true;
+    Ok(policy)
+}
+
+fn load_box(dirs: &Dirs, name: &str) -> Result<AppBox, String> {
+    AppBox::load(dirs, name).ok_or_else(|| format!("no box named '{name}'. See 'isolated box list'."))
+}
+
+fn os_string(v: OsString) -> Result<String, String> {
+    v.into_string().map_err(|_| "invalid text in an argument".to_string())
+}
+
+fn app_box(mut parser: lexopt::Parser, dirs: &Dirs, out: &Out) -> Result<ExitCode, String> {
+    let sub = single_value(&mut parser, "install, run, list, add, forget or delete").unwrap_or_else(|_| "list".into());
+    let store = ProfileStore::new(dirs.profiles());
+    match sub.as_str() {
+        "list" | "ls" => {
+            let boxes = AppBox::list(dirs);
+            if boxes.is_empty() {
+                out.info("No boxes yet. Install an app with: isolated box install -- <installer>");
+            }
+            for b in boxes {
+                out.info(&format!("{} (profile {})", b.name, b.profile));
+                if b.apps.is_empty() {
+                    out.info("    no apps saved");
+                }
+                for a in &b.apps {
+                    out.info(&format!("    {:<24} {}", a.name, a.path));
+                }
+            }
+            Ok(ExitCode::SUCCESS)
+        }
+        "install" => box_install(parser, dirs, &store, out),
+        "options" => {
+            let target = single_path(&mut parser)?;
+            let target = std::path::absolute(&target).unwrap_or(target);
+            Ok(gui(isolated_gui::Start::Install(target)))
+        }
+        "run" | "start" => {
+            let mut accept_weaker = false;
+            let mut positional: Vec<String> = Vec::new();
+            let mut args: Vec<String> = Vec::new();
+            while let Some(arg) = parser.next().map_err(|e| e.to_string())? {
+                match arg {
+                    Long("accept-weaker") => accept_weaker = true,
+                    Value(v) => {
+                        positional.push(os_string(v)?);
+                        if positional.len() == 2 {
+                            for rest in parser.raw_args().map_err(|e| e.to_string())? {
+                                args.push(rest.to_string_lossy().into_owned());
+                            }
+                            break;
+                        }
+                    }
+                    other => return Err(other.unexpected().to_string()),
+                }
+            }
+            let [box_name, app] = <[String; 2]>::try_from(positional)
+                .map_err(|_| "usage: isolated box run <box> <app> [args...]".to_string())?;
+            let b = load_box(dirs, &box_name)?;
+            let (target, mut all_args) = match b.find_app(&app) {
+                Some(a) => (PathBuf::from(&a.path), a.args.clone()),
+                None if std::path::Path::new(&app).is_file() => (PathBuf::from(&app), Vec::new()),
+                None => return Err(format!("box '{}' has no app named '{app}'.", b.name)),
+            };
+            if !target.exists() {
+                return Err(format!(
+                    "{} is no longer in box '{}'. It may have been uninstalled.",
+                    target.display(),
+                    b.name
+                ));
+            }
+            all_args.extend(args);
+            let policy = box_policy(&store, &b)?;
+            let _ = isolated_windows::repair(dirs);
+            if !accept_gaps(&policy, &mut accept_weaker, out)? {
+                return Ok(ExitCode::from(1));
+            }
+            let req = LaunchRequest {
+                profile_name: policy.name.clone(),
+                target: target.clone(),
+                args: all_args,
+                accept_weaker,
+                app_box: Some(b.name.clone()),
+                installer: false,
+                raw_tail: String::new(),
+            };
+            let sandbox = isolated_windows::launch(dirs, &policy, &req)?;
+            out.info(&format!(
+                "Started {app} from box {} in sandbox {}.",
+                b.name,
+                sandbox.id()
+            ));
+            let code = sandbox.wait()?;
+            Ok(ExitCode::from(code.min(255) as u8))
+        }
+        "add" => {
+            let box_name = single_value(&mut parser, "a box name")?;
+            let program = single_path(&mut parser)?;
+            let mut name = None;
+            while let Some(arg) = parser.next().map_err(|e| e.to_string())? {
+                match arg {
+                    Long("name") => name = Some(os_string(parser.value().map_err(|e| e.to_string())?)?),
+                    other => return Err(other.unexpected().to_string()),
+                }
+            }
+            let mut b = load_box(dirs, &box_name)?;
+            let program = std::path::absolute(&program).unwrap_or(program);
+            if !program.is_file() {
+                return Err(format!("{} does not exist.", program.display()));
+            }
+            let name = name.unwrap_or_else(|| {
+                program
+                    .file_stem()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| "App".into())
+            });
+            b.add_apps(vec![BoxApp {
+                name: name.clone(),
+                path: program.to_string_lossy().into_owned(),
+                args: Vec::new(),
+            }]);
+            b.save(dirs)?;
+            out.info(&format!("Saved {name} in box {}.", b.name));
+            Ok(ExitCode::SUCCESS)
+        }
+        "forget" => {
+            let box_name = single_value(&mut parser, "a box name")?;
+            let app = single_value(&mut parser, "an app name")?;
+            let mut b = load_box(dirs, &box_name)?;
+            let path = b
+                .find_app(&app)
+                .map(|a| a.path.clone())
+                .ok_or_else(|| format!("box '{}' has no app named '{app}'.", b.name))?;
+            b.apps.retain(|a| a.path != path);
+            b.save(dirs)?;
+            out.info(&format!("Removed {app} from box {}.", b.name));
+            Ok(ExitCode::SUCCESS)
+        }
+        "delete" | "remove" => {
+            let box_name = single_value(&mut parser, "a box name")?;
+            let b = load_box(dirs, &box_name)?;
+            isolated_windows::boxes::remove(dirs, &b.name)?;
+            out.info(&format!("Deleted box {}.", b.name));
+            Ok(ExitCode::SUCCESS)
+        }
+        other => Err(format!("unknown box command '{other}'")),
+    }
+}
+
+fn box_install(mut parser: lexopt::Parser, dirs: &Dirs, store: &ProfileStore, out: &Out) -> Result<ExitCode, String> {
+    let mut profile: Option<String> = None;
+    let mut net = true;
+    let mut accept_weaker = false;
+    let mut box_name: Option<String> = None;
+    let mut target: Option<PathBuf> = None;
+    let mut args: Vec<String> = Vec::new();
+    while let Some(arg) = parser.next().map_err(|e| e.to_string())? {
+        match arg {
+            Long("profile") | Short('p') => profile = Some(os_string(parser.value().map_err(|e| e.to_string())?)?),
+            Long("net") => net = true,
+            Long("no-net") | Long("offline") => net = false,
+            Long("accept-weaker") => accept_weaker = true,
+            Long("box") => box_name = Some(os_string(parser.value().map_err(|e| e.to_string())?)?),
+            Value(v) if box_name.is_none() && target.is_none() => {
+                // `box install <box> -- <installer>` or `box install <installer>`.
+                let v = os_string(v)?;
+                let looks_like_file = std::path::Path::new(&v).is_file();
+                if looks_like_file {
+                    target = Some(PathBuf::from(v));
+                    for rest in parser.raw_args().map_err(|e| e.to_string())? {
+                        args.push(rest.to_string_lossy().into_owned());
+                    }
+                    break;
+                }
+                box_name = Some(v);
+            }
+            Value(v) => {
+                target = Some(PathBuf::from(v));
+                for rest in parser.raw_args().map_err(|e| e.to_string())? {
+                    args.push(rest.to_string_lossy().into_owned());
+                }
+                break;
+            }
+            other => return Err(format!("{}. Try 'isolated --help'.", other.unexpected())),
+        }
+    }
+    let target = target.ok_or("expected an installer, for example: isolated box install -- setup.exe")?;
+    let target = std::path::absolute(&target).unwrap_or(target);
+    if !target.is_file() {
+        return Err(format!("{} does not exist.", target.display()));
+    }
+    let target_s = target.to_string_lossy().into_owned();
+    let box_name = match box_name {
+        Some(n) => n.trim().to_string(),
+        None => isolated_core::boxes::suggest_name(dirs, &target_s),
+    };
+    isolated_core::boxes::check_name(&box_name)?;
+    let mut b = match AppBox::load(dirs, &box_name) {
+        Some(b) => b,
+        None => {
+            let settings = Settings::load(dirs);
+            let p = profile.clone().unwrap_or(settings.default_profile);
+            let p = if store.load(&p).is_ok() {
+                p
+            } else {
+                DEFAULT_PROFILE.to_string()
+            };
+            AppBox::new(&box_name, &p)
+        }
+    };
+    if let Some(p) = profile {
+        store.load(&p)?;
+        b.profile = p;
+    }
+    b.save(dirs)?;
+
+    let mut policy = box_policy(store, &b)?;
+    if net {
+        policy.network.mode = NetworkMode::Full;
+    } else {
+        policy.network.mode = NetworkMode::None;
+    }
+    let _ = isolated_windows::repair(dirs);
+    if !accept_gaps(&policy, &mut accept_weaker, out)? {
+        return Ok(ExitCode::from(1));
+    }
+
+    let folder = isolated_windows::boxes::folder(&policy, &b.name)?;
+    let before = isolated_windows::boxes::snapshot(&folder);
+
+    // Ask installers we recognize to install for this user, into the box.
+    let mut pre = Vec::new();
+    let mut raw_tail = String::new();
+    if target_s.to_ascii_lowercase().ends_with(".exe") {
+        let head = read_head(&target, 8 << 20);
+        let kind = isolated_core::boxes::detect_installer(&head);
+        let app_dir = isolated_core::boxes::name_from_installer(&target_s);
+        let dir = isolated_windows::boxes::install_dir(&policy, &folder, &app_dir);
+        let (p, tail) = isolated_core::boxes::per_user_args(kind, &dir.to_string_lossy(), !args.is_empty());
+        pre = p;
+        raw_tail = tail.join(" ");
+    }
+    pre.extend(args);
+
+    let req = LaunchRequest {
+        profile_name: policy.name.clone(),
+        target: target.clone(),
+        args: pre,
+        accept_weaker,
+        app_box: Some(b.name.clone()),
+        installer: true,
+        raw_tail,
+    };
+    let sandbox = isolated_windows::launch(dirs, &policy, &req)?;
+    out.info(&format!(
+        "Installing {} into box {} (sandbox {}). Isolated waits until the installer and anything it started have closed.",
+        target.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(),
+        b.name,
+        sandbox.id()
+    ));
+    let code = sandbox.wait()?;
+
+    let (shortcuts, exes) = isolated_windows::boxes::found_since(&folder, &before);
+    let found = isolated_core::boxes::choose_apps(&shortcuts, &exes);
+    // Re-read: the window may have changed the box while we waited.
+    let mut b = AppBox::load(dirs, &b.name).unwrap_or(b);
+    let names: Vec<String> = found.iter().map(|a| a.name.clone()).collect();
+    let added = b.add_apps(found);
+    b.save(dirs)?;
+
+    let msg = if added > 0 {
+        format!(
+            "Installed into box '{}'. Saved {}.\n\nStart it from the Installed apps list in the Isolated window, or run: isolated box run \"{}\" \"{}\"",
+            b.name,
+            names.join(", "),
+            b.name,
+            names[0]
+        )
+    } else if !b.apps.is_empty() {
+        format!(
+            "The installer finished (exit code {code}). No new programs were found, so box '{}' keeps its saved apps.",
+            b.name
+        )
+    } else {
+        format!(
+            "The installer finished (exit code {code}), but no program was found in box '{}'.\n\nIf the installer showed an error, it may need administrator rights, which a sandbox cannot give. Otherwise, add the program from the Installed apps list.",
+            b.name
+        )
+    };
+    out.info(&msg);
+    if !out.console {
+        shell::message_box("Isolated", &msg, if added > 0 { Icon::Info } else { Icon::Warning });
+    }
+    Ok(ExitCode::from(if added > 0 || !b.apps.is_empty() { 0 } else { 2 }))
+}
+
+fn read_head(path: &std::path::Path, max: u64) -> Vec<u8> {
+    use std::io::Read;
+    let mut buf = Vec::new();
+    if let Ok(f) = std::fs::File::open(path) {
+        let _ = f.take(max).read_to_end(&mut buf);
+    }
+    buf
 }

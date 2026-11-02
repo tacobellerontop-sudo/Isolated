@@ -29,6 +29,14 @@ pub struct LaunchRequest {
     pub args: Vec<String>,
     /// Launch even if the sandbox would be weaker than the policy asks.
     pub accept_weaker: bool,
+    /// Run inside this app box, whose folders are kept between runs.
+    pub app_box: Option<String>,
+    /// The target is an installer: start it without asking for
+    /// administrator rights, and run `.msi` files through msiexec.
+    pub installer: bool,
+    /// Appended to the command line as is (for switches such as NSIS's
+    /// `/D=` that must not be quoted).
+    pub raw_tail: String,
 }
 
 /// Live numbers for a running sandbox.
@@ -98,6 +106,158 @@ pub fn launch(dirs: &isolated_core::Dirs, policy: &Policy, req: &LaunchRequest) 
     {
         let _ = (dirs, policy, req);
         unsupported()
+    }
+}
+
+/// App boxes: the folders behind [`isolated_core::boxes::AppBox`].
+pub mod boxes {
+    use super::*;
+    use isolated_core::boxes::{FoundExe, FoundShortcut};
+    use std::collections::BTreeSet;
+    use std::path::Path;
+
+    /// The box's base folder for the policy's tier, created if needed. Apps
+    /// in the box see `<folder>\Home` as their user folder.
+    pub fn folder(policy: &Policy, box_name: &str) -> Result<PathBuf> {
+        #[cfg(windows)]
+        return crate::win::launch::box_folder(policy, box_name);
+        #[cfg(not(windows))]
+        {
+            let _ = (policy, box_name);
+            unsupported()
+        }
+    }
+
+    /// Where an installer is asked to install `app` inside the box.
+    pub fn install_dir(policy: &Policy, folder: &Path, app: &str) -> PathBuf {
+        #[cfg(windows)]
+        return crate::win::launch::box_install_dir(policy, folder, app);
+        #[cfg(not(windows))]
+        {
+            let _ = policy;
+            folder.join("Programs").join(app)
+        }
+    }
+
+    /// Deletes the box's folders and sandbox identity.
+    pub fn delete(box_name: &str) -> Result<()> {
+        #[cfg(windows)]
+        return crate::win::launch::delete_box(box_name);
+        #[cfg(not(windows))]
+        {
+            let _ = box_name;
+            Ok(())
+        }
+    }
+
+    /// True if any app in the box is running.
+    pub fn in_use(dirs: &isolated_core::Dirs, box_name: &str) -> bool {
+        let c = container_name(box_name);
+        crate::running(dirs).iter().any(|e| e.container == c)
+    }
+
+    /// Deletes a box: its saved list, folders and sandbox identity. Refused
+    /// while an app in it is running.
+    pub fn remove(dirs: &isolated_core::Dirs, box_name: &str) -> Result<()> {
+        if in_use(dirs, box_name) {
+            return Err(format!("Box '{box_name}' is in use. Stop its apps first."));
+        }
+        delete(box_name)?;
+        isolated_core::boxes::AppBox::remove(dirs, box_name);
+        Ok(())
+    }
+
+    /// The sandbox identity name of a box, as recorded in the running list.
+    pub fn container_name(box_name: &str) -> String {
+        #[cfg(windows)]
+        return crate::win::appcontainer::box_container_name(box_name);
+        #[cfg(not(windows))]
+        format!("Isolated.box.{box_name}")
+    }
+
+    const MAX_FILES: usize = 300_000;
+    const MAX_DEPTH: usize = 14;
+
+    fn walk(dir: &Path, depth: usize, out: &mut Vec<(PathBuf, u64)>, seen: &mut usize) {
+        if depth > MAX_DEPTH || *seen > MAX_FILES {
+            return;
+        }
+        let Ok(rd) = std::fs::read_dir(dir) else { return };
+        for e in rd.flatten() {
+            *seen += 1;
+            let Ok(ft) = e.file_type() else { continue };
+            let p = e.path();
+            if ft.is_dir() {
+                walk(&p, depth + 1, out, seen);
+            } else if ft.is_file() {
+                let ext = p
+                    .extension()
+                    .and_then(|x| x.to_str())
+                    .map(|x| x.to_ascii_lowercase())
+                    .unwrap_or_default();
+                if ext == "exe" || ext == "lnk" {
+                    let size = e.metadata().map(|m| m.len()).unwrap_or(0);
+                    out.push((p, size));
+                }
+            }
+        }
+    }
+
+    fn list(folder: &Path) -> Vec<(PathBuf, u64)> {
+        let mut out = Vec::new();
+        let mut seen = 0;
+        // Skip the private temp folder: installers unpack themselves there.
+        let Ok(rd) = std::fs::read_dir(folder) else { return out };
+        for e in rd.flatten() {
+            let p = e.path();
+            let name = e.file_name().to_string_lossy().to_ascii_lowercase();
+            if p.is_dir() && name != "temp" && name != "inetcache" {
+                walk(&p, 1, &mut out, &mut seen);
+            }
+        }
+        out
+    }
+
+    /// Programs and shortcuts in a box, to compare before and after an install.
+    pub fn snapshot(folder: &Path) -> BTreeSet<String> {
+        list(folder)
+            .into_iter()
+            .map(|(p, _)| isolated_core::profile::normalize_path_key(&p.to_string_lossy()))
+            .collect()
+    }
+
+    /// Shortcuts and programs that appeared in the box since `before`.
+    /// Shortcuts pointing outside the box are ignored.
+    pub fn found_since(folder: &Path, before: &BTreeSet<String>) -> (Vec<FoundShortcut>, Vec<FoundExe>) {
+        let root = isolated_core::profile::normalize_path_key(&folder.to_string_lossy());
+        let mut shortcuts = Vec::new();
+        let mut exes = Vec::new();
+        for (p, size) in list(folder) {
+            let s = p.to_string_lossy().into_owned();
+            if before.contains(&isolated_core::profile::normalize_path_key(&s)) {
+                continue;
+            }
+            if s.to_ascii_lowercase().ends_with(".lnk") {
+                if let Some((target, args)) = shell::read_shortcut(&p) {
+                    let t = target.to_string_lossy().into_owned();
+                    if !isolated_core::profile::normalize_path_key(&t).starts_with(&root) || !target.is_file() {
+                        continue;
+                    }
+                    shortcuts.push(FoundShortcut {
+                        name: p
+                            .file_stem()
+                            .map(|n| n.to_string_lossy().into_owned())
+                            .unwrap_or_default(),
+                        target: t,
+                        args,
+                    });
+                }
+            } else {
+                exes.push(FoundExe { path: s, size });
+            }
+        }
+        shortcuts.sort_by_key(|a| a.name.to_lowercase());
+        (shortcuts, exes)
     }
 }
 
@@ -291,6 +451,31 @@ pub mod shell {
     pub fn pick_folder() -> Option<PathBuf> {
         #[cfg(windows)]
         return crate::win::shell::pick(true);
+        #[cfg(not(windows))]
+        None
+    }
+
+    /// A shortcut's target and arguments.
+    pub fn read_shortcut(lnk: &std::path::Path) -> Option<(PathBuf, Vec<String>)> {
+        #[cfg(windows)]
+        {
+            let info = crate::win::shell::resolve_shortcut(lnk).ok()?;
+            if info.target.as_os_str().is_empty() {
+                return None;
+            }
+            Some((info.target, crate::win::launch::split_args(&info.arguments)))
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = lnk;
+            None
+        }
+    }
+
+    /// Asks users to pick an installer.
+    pub fn pick_installer() -> Option<PathBuf> {
+        #[cfg(windows)]
+        return crate::win::shell::pick_installer();
         #[cfg(not(windows))]
         None
     }

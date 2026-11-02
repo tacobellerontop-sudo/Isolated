@@ -68,6 +68,14 @@ pub fn open(target: &str) {
 }
 
 pub fn pick(folder: bool) -> Option<PathBuf> {
+    pick_with(folder, "Programs and scripts", "*.exe;*.lnk;*.bat;*.cmd;*.ps1;*.com")
+}
+
+pub fn pick_installer() -> Option<PathBuf> {
+    pick_with(false, "Installers", "*.exe;*.msi")
+}
+
+fn pick_with(folder: bool, kind: &str, pattern: &str) -> Option<PathBuf> {
     com_init();
     unsafe {
         let dialog: IFileOpenDialog = CoCreateInstance(&FileOpenDialog, None, CLSCTX_INPROC_SERVER).ok()?;
@@ -76,8 +84,8 @@ pub fn pick(folder: bool) -> Option<PathBuf> {
             opts |= FOS_PICKFOLDERS;
         }
         dialog.SetOptions(opts).ok()?;
-        let n1 = Wide::new("Programs and scripts");
-        let s1 = Wide::new("*.exe;*.lnk;*.bat;*.cmd;*.ps1;*.com");
+        let n1 = Wide::new(kind);
+        let s1 = Wide::new(pattern);
         let n2 = Wide::new("All files");
         let s2 = Wide::new("*.*");
         if !folder {

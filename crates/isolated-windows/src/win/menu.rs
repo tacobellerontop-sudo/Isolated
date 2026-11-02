@@ -17,6 +17,7 @@ pub const CLASSES: &[&str] = &[
     "batfile",
     "cmdfile",
     "Microsoft.PowerShellScript.1",
+    "Msi.Package",
 ];
 const VERB: &str = "Isolated";
 
@@ -127,6 +128,7 @@ fn notify() {
 pub fn register(exe: &Path) -> Result<(), String> {
     let exe = exe.to_string_lossy();
     let q = format!("\"{exe}\"");
+    let install = ("05install", "Install in Isolated...", format!("{q} box options \"%1\""));
     let entries: [(&str, &str, String); 4] = [
         ("01run", "Run in Isolated", format!("{q} run \"%1\"")),
         (
@@ -152,7 +154,17 @@ pub fn register(exe: &Path) -> Result<(), String> {
         set_string(&k, Some("MUIVerb"), "Run in Isolated")?;
         set_string(&k, Some("Icon"), &format!("{exe},0"))?;
         set_string(&k, Some("SubCommands"), "")?;
-        for (sub, label, command) in &entries {
+        // Installers: .msi files only get the install entry; programs get it
+        // after the run entries.
+        let list: Vec<&(&str, &str, String)> = match *class {
+            "Msi.Package" => vec![&install],
+            "exefile" => entries.iter().chain(std::iter::once(&install)).collect(),
+            _ => entries.iter().collect(),
+        };
+        if *class == "Msi.Package" {
+            set_string(&k, Some("MUIVerb"), "Install in Isolated")?;
+        }
+        for (sub, label, command) in list {
             let sk = create_key(HKEY_CURRENT_USER, &format!(r"{base}\shell\{sub}"))?;
             set_string(&sk, Some("MUIVerb"), label)?;
             let ck = create_key(HKEY_CURRENT_USER, &format!(r"{base}\shell\{sub}\command"))?;
