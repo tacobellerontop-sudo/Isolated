@@ -5,7 +5,9 @@
 #![forbid(unsafe_code)]
 
 pub mod boxes;
+pub mod cabinet;
 pub mod cmdline;
+pub mod msi;
 pub mod policy;
 pub mod profile;
 pub mod sha256;

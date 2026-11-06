@@ -19,8 +19,11 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+mod folders;
 mod fonts;
 mod icon;
+
+pub use folders::{ask_folders, FolderChoice};
 
 /// What the window opens on.
 #[derive(Debug, Clone)]
@@ -189,7 +192,6 @@ impl App {
         };
         app.boxes = AppBox::list(&app.dirs);
         app.reload_profiles();
-        install::refresh_version();
         let _ = isolated_windows::repair(&app.dirs);
         match start {
             Start::Home => {}
@@ -546,6 +548,9 @@ fn summary(p: &Policy) -> String {
         "{net} · {clip} · {folders} folder{}",
         if folders == 1 { "" } else { "s" }
     );
+    if p.filesystem.ask_for_folders {
+        s.push_str(" · asks for folders");
+    }
     if p.tier == Tier::Compatible {
         s.push_str(" · compatible tier");
     }
@@ -974,6 +979,10 @@ impl App {
             "Give the app its own empty user folders (AppData, Documents, temp)",
         );
         ui.checkbox(&mut p.filesystem.program_folder, "Let the app read the folder it is in");
+        ui.checkbox(
+            &mut p.filesystem.ask_for_folders,
+            "Ask which folders to share each time the app starts",
+        );
         for (title, list, new, hint) in [
             ("Folders it can read", &mut p.filesystem.read_only, &mut ed.new_ro, "ro"),
             (

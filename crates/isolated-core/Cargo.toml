@@ -5,5 +5,11 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
+flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
+lzxd = "0.2"
+msi = "0.11"
 serde.workspace = true
 toml.workspace = true
+
+[dev-dependencies]
+cab = "0.6"

@@ -39,6 +39,7 @@ entry is under **Show more options**. The submenu has:
 | --- | --- |
 | Run in Isolated | Runs with the app's saved profile, or `strict` if it has none |
 | Run in Isolated (offline) | Same, but with no network for this run |
+| Run in Isolated with folders... | Pick which of your folders the app can see, then run |
 | Run in Isolated with options... | Pick permissions in a small dialog first |
 | Edit Isolated profile... | Save permissions for this app |
 | Install in Isolated... | Install this app into a box (programs and `.msi` files) |
@@ -60,10 +61,28 @@ box removes everything installed in it.
 
 Installers that can install for one user work this way. Inno Setup
 installers are tested on every build; NSIS and Squirrel (Electron)
-installers are expected to work, and `.msi` files are tried as a per-user
-install but may fail because Windows Installer runs as a system service.
-Installers that must change Windows itself, such as drivers, services and
-system-wide runtimes, cannot run in a sandbox.
+installers are expected to work. Installers that must change Windows itself,
+such as drivers, services and system-wide runtimes, cannot run in a sandbox.
+
+**`.msi` files** are not run at all. Windows Installer is a system service
+that works outside any sandbox, so instead Isolated reads the package and
+unpacks its files into the box itself, in the folders the package names
+(Program Files becomes the box's own Programs folder), and saves the programs
+its Start menu shortcuts point to. No code from the package runs, so
+anything the installer would set up beyond its files (settings in the
+registry, services, file types, files for Windows system folders) is left
+out. Most apps that ship as an `.msi` only need their files; the 7-Zip
+`.msi` is tested on every build. Packages that keep their files outside the
+`.msi` are not supported yet.
+
+**Choosing folders.** **Run in Isolated with folders...** opens a small
+window before the app starts: add the folders it may see (or drop them on
+the window), and tick **Can change files** for the ones it may save into.
+Everything else stays hidden. The folders are offered again next time, and
+access ends when the app exits. To always ask for an app, give it the
+built-in `folders` profile, or tick **Ask which folders to share each time
+the app starts** in its profile. Apps in a box whose profile asks get the
+same window.
 
 While an installer runs, Isolated briefly maps a spare drive letter to the
 box (some installers check the drive's root, which a sandbox cannot read)
@@ -77,6 +96,8 @@ never runs outside the sandbox.
 isolated run --no-net -- .\suspicious.exe
 isolated run --ro "$HOME\Documents\input" --rw "$HOME\Documents\output" -- converter.exe
 isolated run --profile game-mod -- .\launcher.exe
+isolated run --ask-folders -- .\editor.exe
+isolated box install --box 7-Zip -- .\7z2408-x64.msi
 isolated box install --box Editor -- .\EditorSetup.exe
 isolated box list
 isolated box run Editor "Editor"
@@ -105,7 +126,8 @@ Folder grants are temporary. They are recorded in a journal before they are
 applied and removed when the program exits, or on the next start of Isolated
 after a crash.
 
-Built-in profiles: `strict`, `offline`, `online`, `game-mod`, `dev-build`,
+Built-in profiles: `strict`, `offline`, `online`, `folders` (asks which
+folders to share each time; no network), `game-mod`, `dev-build`,
 and `compatible` (a weaker tier for programs that break under full isolation:
 low integrity and no privileges, but the program can read your files and use
 the network). See [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md) for limits.

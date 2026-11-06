@@ -1,0 +1,9 @@
+name = "folders"
+description = "Asks which of your folders the app can see each time it starts. Everything else stays hidden. No network; copy and paste work."
+extends = "strict"
+
+[filesystem]
+ask_for_folders = true
+
+[devices]
+clipboard = "full"

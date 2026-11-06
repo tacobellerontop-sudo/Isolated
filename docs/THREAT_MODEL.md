@@ -36,6 +36,15 @@ environment, and process mitigations (heap terminate, bottom-up ASLR).
 - **Network firewall off.** AppContainer network isolation is enforced by
   the Windows Filtering Platform; policies that disable it can weaken it.
 
+## `.msi` packages
+
+Isolated never hands an `.msi` to Windows Installer, whose service runs
+outside the sandbox. It parses the package itself, in memory-safe Rust,
+writes only into the box's own folders (every name is cleaned and checked
+to stay inside the box), caps the unpacked size, and runs none of the
+package's custom actions. The parsing happens in Isolated's own process, so
+a bug in it could matter; there is no unsafe code in it.
+
 ## Updates
 
 The updater only downloads over HTTPS from this repository's GitHub

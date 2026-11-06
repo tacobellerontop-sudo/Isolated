@@ -58,12 +58,28 @@ pub fn install() -> Result<PathBuf, String> {
     Ok(dest)
 }
 
+/// After an update: records the new version and rewrites the right-click
+/// menu, whose entries may have changed. Does nothing when up to date.
 pub fn refresh_version() {
-    if menu::get_string(UNINSTALL_KEY, Some("DisplayName")).is_some() {
-        if let Ok(k) = menu::create_key(HKEY_CURRENT_USER, UNINSTALL_KEY) {
-            let _ = menu::set_string(&k, Some("DisplayVersion"), isolated_core::version::CURRENT);
-        }
+    if menu::get_string(UNINSTALL_KEY, Some("DisplayName")).is_none() {
+        return;
     }
+    // Only the installed copy speaks for the installed version.
+    let key = |p: &std::path::Path| isolated_core::profile::normalize_path_key(&p.to_string_lossy());
+    let (Some(registered), Ok(me)) = (menu::registered_exe(), std::env::current_exe()) else {
+        return;
+    };
+    if key(&registered) != key(&me) {
+        return;
+    }
+    let current = isolated_core::version::CURRENT;
+    if menu::get_string(UNINSTALL_KEY, Some("DisplayVersion")).as_deref() == Some(current) {
+        return;
+    }
+    if let Ok(k) = menu::create_key(HKEY_CURRENT_USER, UNINSTALL_KEY) {
+        let _ = menu::set_string(&k, Some("DisplayVersion"), current);
+    }
+    let _ = menu::register(&registered);
 }
 
 pub fn uninstall(dirs: &isolated_core::Dirs, remove_data: bool) -> Result<(), String> {

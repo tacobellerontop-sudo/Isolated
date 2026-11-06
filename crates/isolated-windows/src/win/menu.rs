@@ -128,8 +128,8 @@ fn notify() {
 pub fn register(exe: &Path) -> Result<(), String> {
     let exe = exe.to_string_lossy();
     let q = format!("\"{exe}\"");
-    let install = ("05install", "Install in Isolated...", format!("{q} box options \"%1\""));
-    let entries: [(&str, &str, String); 4] = [
+    let install = ("06install", "Install in Isolated...", format!("{q} box options \"%1\""));
+    let entries: [(&str, &str, String); 5] = [
         ("01run", "Run in Isolated", format!("{q} run \"%1\"")),
         (
             "02offline",
@@ -137,12 +137,17 @@ pub fn register(exe: &Path) -> Result<(), String> {
             format!("{q} run --no-net \"%1\""),
         ),
         (
-            "03options",
+            "03folders",
+            "Run in Isolated with folders...",
+            format!("{q} run --ask-folders \"%1\""),
+        ),
+        (
+            "04options",
             "Run in Isolated with options...",
             format!("{q} options \"%1\""),
         ),
         (
-            "04profile",
+            "05profile",
             "Edit Isolated profile...",
             format!("{q} profile edit \"%1\""),
         ),
