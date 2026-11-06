@@ -10,6 +10,7 @@ pub const BUILTIN: &[(&str, &str)] = &[
     ("strict", include_str!("../../../profiles/strict.toml")),
     ("offline", include_str!("../../../profiles/offline.toml")),
     ("online", include_str!("../../../profiles/online.toml")),
+    ("folders", include_str!("../../../profiles/folders.toml")),
     ("game-mod", include_str!("../../../profiles/game-mod.toml")),
     ("dev-build", include_str!("../../../profiles/dev-build.toml")),
     ("compatible", include_str!("../../../profiles/compatible.toml")),
@@ -326,6 +327,11 @@ mod tests {
         let strict = s.load("strict").unwrap();
         assert_eq!(strict.network.mode, NetworkMode::None);
         assert_eq!(s.load("compatible").unwrap().tier, Tier::Compatible);
+        let folders = s.load("folders").unwrap();
+        assert!(folders.filesystem.ask_for_folders);
+        assert_eq!(folders.network.mode, NetworkMode::None);
+        assert!(!strict.filesystem.ask_for_folders);
+        assert!(!strict.to_toml().contains("ask_for_folders"));
     }
 
     #[test]

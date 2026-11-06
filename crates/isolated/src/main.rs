@@ -1,14 +1,15 @@
 //! `isolated.exe`: the right-click menu target, the window, and the
 //! command-line tool, in one small binary. Which one runs depends on the
-//! arguments. A sandbox launch never loads the GUI; the process becomes a
-//! windowless watcher that cleans up and exits when the app exits.
+//! arguments. A sandbox launch only opens a window when the profile asks
+//! which folders to share; the process then becomes a windowless watcher
+//! that cleans up and exits when the app exits.
 
 #![cfg_attr(windows, windows_subsystem = "windows")]
 #![forbid(unsafe_code)]
 
 use isolated_core::boxes::{AppBox, BoxApp};
 use isolated_core::profile::{ProfileStore, DEFAULT_PROFILE};
-use isolated_core::state::RunningEntry;
+use isolated_core::state::{FolderChoices, RunningEntry};
 use isolated_core::{Dirs, NetworkMode, Overrides, Policy, Settings, Severity, Tier};
 use isolated_windows::shell::{self, Icon};
 use isolated_windows::{install, menu, update, LaunchRequest};
@@ -55,6 +56,8 @@ Run options:
   --net                   Allow internet for this run
   --ro <path>             Also allow reading this folder or file (repeatable)
   --rw <path>             Also allow reading and changing this folder or file (repeatable)
+  --ask-folders           Ask which folders to share before starting
+  --no-ask                Do not ask for folders, even if the profile does
   --compatible            Use the weaker compatible tier
   --accept-weaker         Run even if the sandbox would be weaker than the profile asks
   --verbose               Print notes about the sandbox
@@ -90,6 +93,7 @@ impl Out {
 
 fn main() -> ExitCode {
     update::cleanup_old();
+    install::refresh_version();
     let args: Vec<OsString> = std::env::args_os().skip(1).collect();
     if args.is_empty() {
         return gui(isolated_gui::Start::Home);
@@ -255,6 +259,7 @@ fn run(mut parser: lexopt::Parser, dirs: &Dirs, out: &Out) -> Result<ExitCode, S
     let mut ov = Overrides::default();
     let mut accept_weaker = false;
     let mut verbose = false;
+    let mut ask: Option<bool> = None;
     let mut target: Option<PathBuf> = None;
     let mut args: Vec<String> = Vec::new();
 
@@ -289,6 +294,8 @@ fn run(mut parser: lexopt::Parser, dirs: &Dirs, out: &Out) -> Result<ExitCode, S
             Long("compatible") => ov.tier = Some(Tier::Compatible),
             Long("private-home") => ov.private_home = Some(true),
             Long("accept-weaker") => accept_weaker = true,
+            Long("ask-folders") => ask = Some(true),
+            Long("no-ask") => ask = Some(false),
             Long("verbose") | Short('v') => verbose = true,
             Value(v) => {
                 target = Some(PathBuf::from(v));
@@ -325,8 +332,14 @@ fn run(mut parser: lexopt::Parser, dirs: &Dirs, out: &Out) -> Result<ExitCode, S
             .load(&settings.default_profile)
             .or_else(|_| store.load(DEFAULT_PROFILE))?
     };
+    let explicit_folders = !ov.read_only.is_empty() || !ov.read_write.is_empty();
     ov.apply(&mut policy);
     policy.validate().map_err(|e| e.join("; "))?;
+    if ask.unwrap_or(policy.filesystem.ask_for_folders && !explicit_folders)
+        && !choose_folders(dirs, &target, &mut policy)?
+    {
+        return Ok(ExitCode::from(1));
+    }
 
     // Clean up after any sandbox that was interrupted.
     let _ = isolated_windows::repair(dirs);
@@ -490,6 +503,28 @@ fn accept_gaps(policy: &Policy, accept_weaker: &mut bool, out: &Out) -> Result<b
     Ok(true)
 }
 
+/// Shows the folder picker and adds the folders chosen to the policy.
+/// Returns `Ok(false)` if users cancelled.
+fn choose_folders(dirs: &Dirs, target: &std::path::Path, policy: &mut Policy) -> Result<bool, String> {
+    let program = target.to_string_lossy().into_owned();
+    let mut remembered = FolderChoices::load(dirs);
+    let Some(choice) = isolated_gui::ask_folders(target, &policy.name, remembered.get(&program))? else {
+        return Ok(false);
+    };
+    if choice.remember {
+        remembered.set(&program, choice.folders.clone());
+        let _ = remembered.save(dirs);
+    }
+    for f in choice.folders {
+        if f.write {
+            policy.filesystem.read_write.push(f.path);
+        } else {
+            policy.filesystem.read_only.push(f.path);
+        }
+    }
+    Ok(true)
+}
+
 /// The policy a box runs with: its profile, always with private folders.
 fn box_policy(store: &ProfileStore, b: &AppBox) -> Result<Policy, String> {
     let mut policy = store
@@ -568,7 +603,10 @@ fn app_box(mut parser: lexopt::Parser, dirs: &Dirs, out: &Out) -> Result<ExitCod
                 ));
             }
             all_args.extend(args);
-            let policy = box_policy(&store, &b)?;
+            let mut policy = box_policy(&store, &b)?;
+            if policy.filesystem.ask_for_folders && !choose_folders(dirs, &target, &mut policy)? {
+                return Ok(ExitCode::from(1));
+            }
             let _ = isolated_windows::repair(dirs);
             if !accept_gaps(&policy, &mut accept_weaker, out)? {
                 return Ok(ExitCode::from(1));
@@ -725,6 +763,9 @@ fn box_install(mut parser: lexopt::Parser, dirs: &Dirs, store: &ProfileStore, ou
 
     let folder = isolated_windows::boxes::folder(&policy, &b.name)?;
     let before = isolated_windows::boxes::snapshot(&folder);
+    if target_s.to_ascii_lowercase().ends_with(".msi") {
+        return msi_install(&target, &b, &policy, &folder, &before, dirs, out);
+    }
     // Fully isolated sandboxes cannot see the system drive's root, which
     // some installers check; give them a drive whose root is the box.
     let alias = if policy.tier == Tier::Isolated {
@@ -794,11 +835,93 @@ fn box_install(mut parser: lexopt::Parser, dirs: &Dirs, store: &ProfileStore, ou
             b.name
         )
     };
-    out.info(&msg);
+    finish_install(&b, added, &msg, out)
+}
+
+fn finish_install(b: &AppBox, added: usize, msg: &str, out: &Out) -> Result<ExitCode, String> {
+    out.info(msg);
     if !out.console {
-        shell::message_box("Isolated", &msg, if added > 0 { Icon::Info } else { Icon::Warning });
+        shell::message_box("Isolated", msg, if added > 0 { Icon::Info } else { Icon::Warning });
     }
     Ok(ExitCode::from(if added > 0 || !b.apps.is_empty() { 0 } else { 2 }))
+}
+
+/// Installs a `.msi` package by unpacking it into the box. Windows Installer
+/// is a system service a sandbox cannot use, so no installer code runs:
+/// Isolated places the package's files and reads its shortcuts itself.
+fn msi_install(
+    target: &std::path::Path,
+    b: &AppBox,
+    policy: &Policy,
+    folder: &std::path::Path,
+    before: &std::collections::BTreeSet<String>,
+    dirs: &Dirs,
+    out: &Out,
+) -> Result<ExitCode, String> {
+    use isolated_core::msi::{unpack, BoxFolders};
+    let programs = isolated_windows::boxes::install_dir(policy, folder, "x")
+        .parent()
+        .map(std::path::Path::to_path_buf)
+        .ok_or("could not find the box's Programs folder")?;
+    let folders = BoxFolders {
+        local_app_data: programs
+            .parent()
+            .map(std::path::Path::to_path_buf)
+            .unwrap_or_else(|| folder.to_path_buf()),
+        programs,
+        home: folder.join("Home"),
+    };
+    out.info(&format!(
+        "Unpacking {} into box {}...",
+        target
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default(),
+        b.name
+    ));
+    let u = unpack(target, folder, &folders).map_err(|e| format!("Could not install {}: {e}", target.display()))?;
+
+    let (mut shortcuts, exes) = isolated_windows::boxes::found_since(folder, before, None);
+    shortcuts.extend(u.shortcuts.iter().cloned());
+    let found = isolated_core::boxes::choose_apps(&shortcuts, &exes);
+    let mut b = AppBox::load(dirs, &b.name).unwrap_or_else(|| b.clone());
+    let names: Vec<String> = found.iter().map(|a| a.name.clone()).collect();
+    let added = b.add_apps(found);
+    b.save(dirs)?;
+
+    let product = if u.product.is_empty() {
+        "The app".to_string()
+    } else {
+        u.product.clone()
+    };
+    let mut msg = if added > 0 {
+        format!(
+            "{product} was unpacked into box '{}' ({} files). Saved {}.\n\nStart it from the Installed apps list in the Isolated window, or run: isolated box run \"{}\" \"{}\"",
+            b.name,
+            u.files,
+            names.join(", "),
+            b.name,
+            names[0]
+        )
+    } else if !b.apps.is_empty() {
+        format!(
+            "{product} was unpacked into box '{}' ({} files). No new programs were found, so the box keeps its saved apps.",
+            b.name, u.files
+        )
+    } else {
+        format!(
+            "{product} was unpacked into box '{}' ({} files), but no program was found in it. Add the program from the Installed apps list.",
+            b.name, u.files
+        )
+    };
+    msg.push_str("\n\nIsolated unpacks .msi files itself, without running the installer's own code, so settings, services or file types the installer would set up are left out.");
+    if u.skipped_system > 0 {
+        msg.push_str(&format!(
+            " {} files meant for Windows system folders were skipped.",
+            u.skipped_system
+        ));
+    }
+    finish_install(&b, added, &msg, out)
 }
 
 fn read_head(path: &std::path::Path, max: u64) -> Vec<u8> {

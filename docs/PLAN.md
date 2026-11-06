@@ -332,8 +332,9 @@ Known challenges and how the plan handles them:
 - **Installers that need admin.** Since v0.2, installers run inside an *app
   box*: a sandbox whose folders are kept. The installer starts without admin
   rights (`RunAsInvoker`), Inno Setup and NSIS installers are asked to install
-  for the current user into the box, and `.msi` files go through per-user
-  `msiexec`. Afterwards the shortcuts and programs the installer created are
+  for the current user into the box. Since v0.3, `.msi` files are not run:
+  Windows Installer is a service outside the sandbox, so Isolated unpacks the
+  package's files into the box itself (no custom actions). Afterwards the shortcuts and programs the installer created are
   saved in the box so users can start them again. Installers that truly need
   admin (drivers, services, system-wide components) still cannot be
   sandboxed, and the GUI says so.

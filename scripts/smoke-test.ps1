@@ -143,11 +143,54 @@ Name: "{autoprograms}\Uninstall Hello Smoke"; Filename: "{uninstallexe}"
     Write-Host "SKIP  Inno Setup is not available on this machine"
 }
 
+# 12. A real .msi package is unpacked into a box (no Windows Installer
+#     service involved) and the program from its Start menu shortcut is saved.
+$msi = Join-Path $instDir "7z2408-x64.msi"
+& $curl -sSL -m 180 -o $msi "https://github.com/ip7z/7zip/releases/download/24.08/7z2408-x64.msi"
+if ((Test-Path $msi) -and ((Get-Item $msi).Length -gt 1MB)) {
+    $code = Run-Sandboxed @("box", "install", "--no-net", "--box", "SmokeMsi", "--", $msi)
+    $boxFile = Join-Path $boxesDir "SmokeMsi.toml"
+    $boxText = (Get-Content $boxFile -Raw -ErrorAction SilentlyContinue)
+    Write-Host $boxText
+    Check ".msi installer unpacks into a box (exit $code)" (($code -eq 0) -and ($boxText -match "7-Zip File Manager") -and ($boxText -match "7zFM\.exe"))
+    $m = [regex]::Match("$boxText", 'path = ["'']([^"'']*7zFM\.exe)["'']')
+    $sevenZip = (Join-Path (Split-Path ($m.Groups[1].Value -replace '\\\\', '\')) "7z.exe")
+    Write-Host "7z.exe in the box: $sevenZip"
+    $code = Run-Sandboxed @("box", "run", "SmokeMsi", $sevenZip, "i")
+    Check "program unpacked from the .msi runs in its box (exit $code)" ($code -eq 0)
+    $code = Run-Sandboxed @("box", "run", "SmokeMsi", $sevenZip, "l", $secret)
+    Check "program from the .msi still can't read user files (exit $code)" ($code -ne 0)
+    Run-Sandboxed @("box", "delete", "SmokeMsi") | Out-Null
+} else {
+    Write-Host "SKIP  could not download the 7-Zip .msi"
+}
+
+# 13. The "folders" profile asks for folders, but not when folders are given
+#     on the command line. (A hang here means the picker opened.)
+$p = Start-Process -FilePath $Exe -ArgumentList @("run", "--profile", "folders", "--ro", $secretDir, "--", $cmd, "/d", "/c", "type `"$secret`"") -PassThru -WindowStyle Hidden
+if ($p.WaitForExit(60000)) {
+    Check "folders profile with a given folder runs without asking (exit $($p.ExitCode))" ($p.ExitCode -eq 0)
+} else {
+    $p.Kill()
+    Check "folders profile with a given folder runs without asking (timed out)" $false
+}
+$p = Start-Process -FilePath $Exe -ArgumentList @("run", "--profile", "folders", "--no-ask", "--", $cmd, "/d", "/c", "type `"$secret`"") -PassThru -WindowStyle Hidden
+if ($p.WaitForExit(60000)) {
+    Check "folders profile without folders still hides user files (exit $($p.ExitCode))" ($p.ExitCode -ne 0)
+} else {
+    $p.Kill()
+    Check "folders profile with --no-ask runs without asking (timed out)" $false
+}
+
 # 8. Right-click menu registers and unregisters.
 & $Exe register | Out-Null
 Start-Sleep -Milliseconds 500
 $reg = Test-Path "HKCU:\Software\Classes\exefile\shell\Isolated\shell\01run\command"
 Check "right-click menu is registered" $reg
+$folders = (Get-ItemProperty "HKCU:\Software\Classes\exefile\shell\Isolated\shell\03folders\command" -ErrorAction SilentlyContinue).'(default)'
+Check "right-click menu has Run in Isolated with folders ($folders)" ("$folders" -match "--ask-folders")
+$msiMenu = Test-Path "HKCU:\Software\Classes\Msi.Package\shell\Isolated\shell\06install\command"
+Check "right-click menu has Install in Isolated for .msi files" $msiMenu
 & $Exe unregister | Out-Null
 Start-Sleep -Milliseconds 500
 Check "right-click menu is removed" (-not (Test-Path "HKCU:\Software\Classes\exefile\shell\Isolated"))

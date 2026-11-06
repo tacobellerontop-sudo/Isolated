@@ -105,6 +105,74 @@ impl Settings {
     }
 }
 
+/// A folder users chose to share with an app for one run.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SharedFolder {
+    pub path: String,
+    /// The app may change files there, not only read them.
+    #[serde(default)]
+    pub write: bool,
+}
+
+/// The folders each app was last given, so the folder picker can start
+/// from them. Kept in `shared-folders.toml`.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct FolderChoices {
+    app: Vec<AppFolders>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+struct AppFolders {
+    program: String,
+    #[serde(default)]
+    folder: Vec<SharedFolder>,
+}
+
+const MAX_REMEMBERED_APPS: usize = 200;
+
+impl FolderChoices {
+    fn file(dirs: &Dirs) -> PathBuf {
+        dirs.config.join("shared-folders.toml")
+    }
+
+    pub fn load(dirs: &Dirs) -> FolderChoices {
+        fs::read_to_string(Self::file(dirs))
+            .ok()
+            .and_then(|t| toml::from_str(&t).ok())
+            .unwrap_or_default()
+    }
+
+    pub fn save(&self, dirs: &Dirs) -> std::io::Result<()> {
+        write_atomic(&Self::file(dirs), toml::to_string(self).unwrap_or_default().as_bytes())
+    }
+
+    /// The folders last chosen for a program.
+    pub fn get(&self, program: &str) -> Vec<SharedFolder> {
+        let key = crate::profile::normalize_path_key(program);
+        self.app
+            .iter()
+            .find(|a| crate::profile::normalize_path_key(&a.program) == key)
+            .map(|a| a.folder.clone())
+            .unwrap_or_default()
+    }
+
+    /// Remembers the folders for a program (most recent first).
+    pub fn set(&mut self, program: &str, folders: Vec<SharedFolder>) {
+        let key = crate::profile::normalize_path_key(program);
+        self.app
+            .retain(|a| crate::profile::normalize_path_key(&a.program) != key);
+        self.app.insert(
+            0,
+            AppFolders {
+                program: program.to_string(),
+                folder: folders,
+            },
+        );
+        self.app.truncate(MAX_REMEMBERED_APPS);
+    }
+}
+
 /// One running sandbox, as recorded in `running\<id>.toml`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RunningEntry {
@@ -297,5 +365,29 @@ mod tests {
     fn ids_differ() {
         assert_ne!(new_sandbox_id(), new_sandbox_id());
         assert_eq!(stable_hash("a"), stable_hash("a"));
+    }
+
+    #[test]
+    fn folder_choices_round_trip() {
+        let root = std::env::temp_dir().join(format!("isolated-test-fc-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let dirs = Dirs::under(&root);
+        let mut c = FolderChoices::load(&dirs);
+        assert!(c.get(r"C:\A\app.exe").is_empty());
+        let list = vec![
+            SharedFolder {
+                path: r"C:\Users\u\Pictures".into(),
+                write: false,
+            },
+            SharedFolder {
+                path: r"D:\Work".into(),
+                write: true,
+            },
+        ];
+        c.set(r"C:\A\app.exe", list.clone());
+        c.save(&dirs).unwrap();
+        let c = FolderChoices::load(&dirs);
+        assert_eq!(c.get(r"c:/a/APP.exe"), list);
+        let _ = fs::remove_dir_all(&root);
     }
 }

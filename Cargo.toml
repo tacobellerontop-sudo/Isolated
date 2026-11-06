@@ -3,10 +3,10 @@ resolver = "2"
 members = ["crates/isolated-core", "crates/isolated-windows", "crates/isolated-gui", "crates/isolated"]
 
 [workspace.package]
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
 repository = "https://github.com/tacobellerontop-sudo/Isolated"
-rust-version = "1.80"
+rust-version = "1.85"
 
 [workspace.dependencies]
 isolated-core = { path = "crates/isolated-core" }

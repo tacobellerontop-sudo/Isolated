@@ -79,6 +79,14 @@ pub struct Filesystem {
     /// Let the program read the folder it is installed in (needed by almost
     /// every program, so on by default).
     pub program_folder: bool,
+    /// Ask users which folders to share each time the program starts. The
+    /// folders picked are added to `read_only` / `read_write` for that run.
+    #[serde(skip_serializing_if = "is_false")]
+    pub ask_for_folders: bool,
+}
+
+fn is_false(b: &bool) -> bool {
+    !*b
 }
 
 impl Default for Filesystem {
@@ -88,6 +96,7 @@ impl Default for Filesystem {
             read_write: Vec::new(),
             private_home: true,
             program_folder: true,
+            ask_for_folders: false,
         }
     }
 }

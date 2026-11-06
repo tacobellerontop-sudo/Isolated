@@ -32,7 +32,8 @@ pub struct LaunchRequest {
     /// Run inside this app box, whose folders are kept between runs.
     pub app_box: Option<String>,
     /// The target is an installer: start it without asking for
-    /// administrator rights, and run `.msi` files through msiexec.
+    /// administrator rights. (`.msi` files are unpacked, not run: see
+    /// `isolated_core::msi`.)
     pub installer: bool,
     /// Appended to the command line as is (for switches such as NSIS's
     /// `/D=` that must not be quoted).
@@ -529,6 +530,22 @@ pub mod shell {
         return crate::win::util::attach_console();
         #[cfg(not(windows))]
         true
+    }
+}
+
+/// Checks that a folder can be shared with a sandbox (it exists and is not
+/// far too broad, such as a whole drive or the whole user folder).
+pub fn check_shared_folder(path: &str, write: bool) -> Result<()> {
+    #[cfg(windows)]
+    return win::launch::check_shared_folder(path, write);
+    #[cfg(not(windows))]
+    {
+        let _ = write;
+        if std::path::Path::new(path).is_dir() {
+            Ok(())
+        } else {
+            Err(format!("The folder '{path}' does not exist."))
+        }
     }
 }
 

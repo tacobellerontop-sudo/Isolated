@@ -88,6 +88,54 @@ fn quote_arg_always(a: &str) -> String {
     }
 }
 
+/// Splits a command-line argument string the way programs usually do.
+pub fn split(s: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut cur = String::new();
+    let mut in_q = false;
+    let mut have = false;
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '\\' => {
+                let mut n = 1;
+                while chars.peek() == Some(&'\\') {
+                    chars.next();
+                    n += 1;
+                }
+                if chars.peek() == Some(&'"') {
+                    cur.extend(std::iter::repeat_n('\\', n / 2));
+                    if n % 2 == 1 {
+                        chars.next();
+                        cur.push('"');
+                    }
+                } else {
+                    cur.extend(std::iter::repeat_n('\\', n));
+                }
+                have = true;
+            }
+            '"' => {
+                in_q = !in_q;
+                have = true;
+            }
+            ' ' | '\t' if !in_q => {
+                if have {
+                    out.push(std::mem::take(&mut cur));
+                    have = false;
+                }
+            }
+            _ => {
+                cur.push(c);
+                have = true;
+            }
+        }
+    }
+    if have {
+        out.push(cur);
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

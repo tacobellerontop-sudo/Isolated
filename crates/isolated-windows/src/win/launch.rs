@@ -181,18 +181,9 @@ fn prepare(target: &Path, args: &[String], depth: u32, installer: bool) -> Resul
             }
             Ok(p)
         }
-        TargetKind::Installer if installer && ts.to_ascii_lowercase().ends_with(".msi") => {
-            // Ask Windows Installer for a per-user install.
-            let msiexec = system_dir().join("msiexec.exe");
-            let mut all = vec!["/i".to_string(), ts.clone(), "ALLUSERS=2".into(), "MSIINSTALLPERUSER=1".into()];
-            all.extend(args.iter().cloned());
-            Ok(Prepared {
-                command_line: cmdline::join(&msiexec.to_string_lossy(), &all),
-                application: Some(msiexec),
-                program: target,
-                workdir: None,
-            })
-        }
+        TargetKind::Installer if installer && ts.to_ascii_lowercase().ends_with(".msi") => Err(
+            "Isolated unpacks .msi files itself instead of running them. Use Install in Isolated.".into(),
+        ),
         TargetKind::Installer if installer => Err(
             "Store app packages (.msix, .appx) cannot be installed in a sandbox. Use the app's regular installer (.exe or .msi)."
                 .into(),
@@ -210,50 +201,7 @@ fn prepare(target: &Path, args: &[String], depth: u32, installer: bool) -> Resul
 
 /// Splits a shortcut's argument string the way programs usually do.
 pub fn split_args(s: &str) -> Vec<String> {
-    let mut out = Vec::new();
-    let mut cur = String::new();
-    let mut in_q = false;
-    let mut have = false;
-    let mut chars = s.chars().peekable();
-    while let Some(c) = chars.next() {
-        match c {
-            '\\' => {
-                let mut n = 1;
-                while chars.peek() == Some(&'\\') {
-                    chars.next();
-                    n += 1;
-                }
-                if chars.peek() == Some(&'"') {
-                    cur.extend(std::iter::repeat_n('\\', n / 2));
-                    if n % 2 == 1 {
-                        chars.next();
-                        cur.push('"');
-                    }
-                } else {
-                    cur.extend(std::iter::repeat_n('\\', n));
-                }
-                have = true;
-            }
-            '"' => {
-                in_q = !in_q;
-                have = true;
-            }
-            ' ' | '\t' if !in_q => {
-                if have {
-                    out.push(std::mem::take(&mut cur));
-                    have = false;
-                }
-            }
-            _ => {
-                cur.push(c);
-                have = true;
-            }
-        }
-    }
-    if have {
-        out.push(cur);
-    }
-    out
+    cmdline::split(s)
 }
 
 fn home_dir() -> PathBuf {
@@ -331,6 +279,13 @@ fn program_grant(program: &Path) -> Option<PathBuf> {
     } else {
         Some(folder)
     }
+}
+
+/// Checks a folder users want to share before the sandbox starts.
+pub fn check_shared_folder(raw: &str, write: bool) -> Result<()> {
+    let expanded = expand_path(raw, &home_dir(), env_var);
+    let p = canonical(&expanded).map_err(|_| format!("The folder '{raw}' does not exist."))?;
+    check_grant(&p, if write { Access::Write } else { Access::Read })
 }
 
 fn env_var(k: &str) -> Option<String> {
