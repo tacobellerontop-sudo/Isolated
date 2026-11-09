@@ -645,10 +645,11 @@ pub fn launch(dirs: &Dirs, policy: &Policy, req: &LaunchRequest) -> Result<Runni
 
     let job = Job::create(&job_name, policy).map_err(cleanup_on_error)?;
 
-    let cwd = prepared
+    let cwd = req
         .workdir
         .clone()
         .filter(|d| d.is_dir())
+        .or_else(|| prepared.workdir.clone().filter(|d| d.is_dir()))
         .or_else(|| match program_grant(&prepared.program) {
             Some(g) if g.is_dir() => Some(g),
             None => prepared.program.parent().map(Path::to_path_buf),

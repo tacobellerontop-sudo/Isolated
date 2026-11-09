@@ -1,5 +1,5 @@
-//! The Isolated window: app profiles, installed apps (boxes), the profile
-//! editor, running sandboxes, settings, the update banner, and the "Run with
+//! The Isolated window: app profiles, containers (boxes) with their installed
+//! apps and files, the profile editor, running sandboxes, settings, the update banner, and the "Run with
 //! options" dialog.
 //!
 //! The window only opens when users ask for it. Sandboxes are always started
@@ -19,6 +19,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+mod browser;
 mod folders;
 mod fonts;
 mod icon;
@@ -136,6 +137,14 @@ struct InstallForm {
     error: Option<String>,
 }
 
+/// The "New container" form.
+struct NewContainer {
+    name: String,
+    profile: String,
+    internet: bool,
+    error: Option<String>,
+}
+
 /// State of the "with options" dialog.
 struct OptionsDialog {
     target: PathBuf,
@@ -163,6 +172,10 @@ struct App {
     boxes: Vec<AppBox>,
     install: Option<InstallForm>,
     confirm_delete_box: Option<String>,
+    new_container: Option<NewContainer>,
+    browser: Option<browser::Browser>,
+    /// Whether each box's apps can reach the internet, refreshed with the list.
+    box_net: std::collections::HashMap<String, bool>,
 }
 
 impl App {
@@ -188,9 +201,12 @@ impl App {
             boxes: Vec::new(),
             install: None,
             confirm_delete_box: None,
+            new_container: None,
+            browser: None,
+            box_net: Default::default(),
             dirs,
         };
-        app.boxes = AppBox::list(&app.dirs);
+        app.reload_boxes();
         app.reload_profiles();
         let _ = isolated_windows::repair(&app.dirs);
         match start {
@@ -343,7 +359,7 @@ impl App {
             .last_refresh
             .is_none_or(|t| t.elapsed() > Duration::from_millis(1000));
         if due {
-            self.boxes = AppBox::list(&self.dirs);
+            self.reload_boxes();
             self.running = isolated_windows::running(&self.dirs)
                 .into_iter()
                 .map(|e| {
@@ -352,6 +368,139 @@ impl App {
                 })
                 .collect();
             self.last_refresh = Some(Instant::now());
+        }
+    }
+
+    fn reload_boxes(&mut self) {
+        self.boxes = AppBox::list(&self.dirs);
+        self.box_net = self
+            .boxes
+            .iter()
+            .map(|b| {
+                (
+                    b.name.clone(),
+                    b.has_internet(&self.store.load(&b.profile).unwrap_or_default()),
+                )
+            })
+            .collect();
+    }
+
+    /// The policy a box's apps run with.
+    fn box_policy(&self, b: &AppBox) -> Policy {
+        let mut p = self.store.load(&b.profile).unwrap_or_default();
+        b.apply(&mut p);
+        p
+    }
+
+    fn open_box_files(&mut self, name: &str) {
+        let Some(b) = self.boxes.iter().find(|b| b.name == name).cloned() else {
+            return;
+        };
+        match isolated_windows::boxes::folder(&self.box_policy(&b), &b.name) {
+            Ok(f) => {
+                self.install = None;
+                self.new_container = None;
+                self.browser = Some(browser::Browser::new(&b.name, f));
+            }
+            Err(e) => self.set_status(e, true),
+        }
+    }
+
+    fn create_container(&mut self) {
+        let Some(f) = self.new_container.as_mut() else { return };
+        let name = f.name.trim().to_string();
+        let checked = isolated_core::boxes::check_name(&name).and_then(|_| {
+            if AppBox::exists(&self.dirs, &name) {
+                Err(format!("A container named '{name}' already exists."))
+            } else {
+                Ok(())
+            }
+        });
+        if let Err(e) = checked {
+            f.error = Some(
+                e.replace("Box names", "Container names")
+                    .replace("A box", "A container"),
+            );
+            return;
+        }
+        let mut b = AppBox::new(&name, &f.profile);
+        b.internet = Some(f.internet);
+        let internet = f.internet;
+        let mut policy = self.store.load(&b.profile).unwrap_or_default();
+        b.apply(&mut policy);
+        let made = isolated_windows::boxes::folder(&policy, &b.name).and_then(|_| b.save(&self.dirs));
+        match made {
+            Ok(()) => {
+                self.new_container = None;
+                self.reload_boxes();
+                self.set_status(
+                    format!(
+                        "Created container '{name}' ({}). Install an app into it, run a program in it, or open its command prompt.",
+                        if internet { "internet allowed" } else { "no internet" }
+                    ),
+                    false,
+                );
+            }
+            Err(e) => {
+                if let Some(f) = self.new_container.as_mut() {
+                    f.error = Some(e);
+                }
+            }
+        }
+    }
+
+    fn set_box_internet(&mut self, name: &str, on: bool) {
+        if let Some(mut b) = AppBox::load(&self.dirs, name) {
+            b.internet = Some(on);
+            match b.save(&self.dirs) {
+                Ok(()) => {
+                    let running = isolated_windows::boxes::in_use(&self.dirs, name);
+                    self.set_status(
+                        format!(
+                            "Internet for '{name}' is now {}.{}",
+                            if on { "allowed" } else { "blocked" },
+                            if running {
+                                " Apps already running keep the old setting until they are restarted."
+                            } else {
+                                ""
+                            }
+                        ),
+                        false,
+                    );
+                }
+                Err(e) => self.set_status(e, true),
+            }
+        }
+        self.reload_boxes();
+    }
+
+    fn save_box_program(&mut self, name: &str, p: &Path) {
+        if let Some(mut b) = AppBox::load(&self.dirs, name) {
+            let app = BoxApp {
+                name: p
+                    .file_stem()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| "App".into()),
+                path: p.to_string_lossy().into_owned(),
+                args: Vec::new(),
+            };
+            let added = b.add_apps(vec![app]);
+            match b.save(&self.dirs) {
+                Ok(()) if added == 0 => {
+                    self.set_status(format!("{} is already in '{name}'s apps.", file_name(p)), false)
+                }
+                Ok(()) => self.set_status(format!("Saved {} in container '{name}'.", file_name(p)), false),
+                Err(e) => self.set_status(e, true),
+            }
+            self.last_refresh = None;
+        }
+    }
+
+    fn run_in_box(&mut self, name: &str, p: &Path) {
+        let path = p.to_string_lossy().into_owned();
+        match isolated_windows::spawn_self(&["box", "run", name, &path]) {
+            Ok(()) => self.set_status(format!("Started {} in container '{name}'.", file_name(p)), false),
+            Err(e) => self.set_status(e, true),
         }
     }
 
@@ -371,6 +520,8 @@ impl App {
     fn open_install_form(&mut self, installer: &str, into: Option<&str>) {
         self.view = View::Installed;
         self.editor = None;
+        self.browser = None;
+        self.new_container = None;
         let box_name = match into {
             Some(b) => b.to_string(),
             None if installer.is_empty() => String::new(),
@@ -416,7 +567,7 @@ impl App {
                 self.install = None;
                 self.set_status(
                     format!(
-                        "Installing {} into box '{box_name}'. A message appears when the installer has finished.",
+                        "Installing {} into container '{box_name}'. A message appears when the installer has finished.",
                         file_name(Path::new(&installer))
                     ),
                     false,
@@ -431,7 +582,7 @@ impl App {
 
     fn run_box_app(&mut self, b: &AppBox, a: &BoxApp) {
         match isolated_windows::spawn_self(&["box", "run", &b.name, &a.path]) {
-            Ok(()) => self.set_status(format!("Started {} from box '{}'.", a.name, b.name), false),
+            Ok(()) => self.set_status(format!("Started {} from container '{}'.", a.name, b.name), false),
             Err(e) => self.set_status(e, true),
         }
     }
@@ -447,8 +598,22 @@ impl eframe::App for App {
 
         // Programs dropped on the window get a profile.
         let dropped: Vec<PathBuf> = ctx.input(|i| i.raw.dropped_files.iter().map(|f| f.path().to_path_buf()).collect());
-        if let Some(p) = dropped.into_iter().next() {
-            self.add_dropped_or_picked(p);
+        match self
+            .browser
+            .as_ref()
+            .filter(|_| self.view == View::Installed && self.editor.is_none())
+        {
+            // Files dropped on a container's file view are copied into it.
+            Some(b) => {
+                for p in dropped {
+                    b.add_from_pc(p, &ctx);
+                }
+            }
+            None => {
+                if let Some(p) = dropped.into_iter().next() {
+                    self.add_dropped_or_picked(p);
+                }
+            }
         }
 
         egui::Panel::top("top").show(ui, |ui| {
@@ -458,7 +623,7 @@ impl eframe::App for App {
                 ui.add_space(16.0);
                 for (v, label) in [
                     (View::Apps, "Apps"),
-                    (View::Installed, "Installed apps"),
+                    (View::Installed, "Containers"),
                     (View::Running, "Running"),
                     (View::Settings, "Settings"),
                 ] {
@@ -468,6 +633,9 @@ impl eframe::App for App {
                         label.to_string()
                     };
                     if ui.selectable_label(self.view == v, text).clicked() {
+                        if v == View::Installed && self.view == View::Installed {
+                            self.browser = None;
+                        }
                         self.view = v;
                         self.editor = None;
                     }
@@ -726,70 +894,127 @@ impl App {
     }
 
     fn installed_ui(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
+        if let Some(mut br) = self.browser.take() {
+            let actions = br.ui(ui);
+            let name = br.box_name.clone();
+            let mut keep = true;
+            for a in actions {
+                match a {
+                    browser::Action::Close => keep = false,
+                    browser::Action::Run(p) => self.run_in_box(&name, &p),
+                    browser::Action::SaveApp(p) => self.save_box_program(&name, &p),
+                    browser::Action::Status(m, e) => self.set_status(m, e),
+                }
+            }
+            if keep && self.browser.is_none() {
+                self.browser = Some(br);
+            }
+            return;
+        }
         ui.add_space(6.0);
         ui.horizontal(|ui| {
-            ui.heading("Installed apps");
+            ui.heading("Containers");
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui.button("Install an app...").clicked() {
                     if let Some(p) = shell::pick_installer() {
                         self.open_install_form(&p.to_string_lossy(), None);
                     }
                 }
+                if ui.button("New container...").clicked() {
+                    self.install = None;
+                    let profile = if self.store.load("online").is_ok() {
+                        "online".to_string()
+                    } else {
+                        self.settings.default_profile.clone()
+                    };
+                    self.new_container = Some(NewContainer {
+                        name: String::new(),
+                        profile,
+                        internet: true,
+                        error: None,
+                    });
+                }
             });
         });
         ui.label(weak(
             ui,
-            "Run an installer inside a box: a sandbox that keeps its files, so the installed app stays there and can be started again later. Right-click an installer and choose Install in Isolated, or drop one here.",
+            "A container is a separate space with its own files. Apps you install, download or run in it keep their settings there, and everything they save stays inside it instead of on your PC. Open its files to take out what you made. Right-click an installer and choose Install in Isolated, or drop one here.",
         ));
         ui.add_space(8.0);
 
+        if self.new_container.is_some() {
+            self.new_container_ui(ui);
+            ui.add_space(8.0);
+        }
         if self.install.is_some() {
             self.install_form_ui(ui, ctx);
             ui.add_space(8.0);
         }
 
-        if self.boxes.is_empty() && self.install.is_none() {
-            ui.label("No installed apps yet.");
+        if self.boxes.is_empty() && self.install.is_none() && self.new_container.is_none() {
+            ui.label("No containers yet. Make one with New container, or install an app.");
         }
         let running: Vec<String> = self.running.iter().map(|(e, _)| e.container.clone()).collect();
         let mut run: Option<(AppBox, BoxApp)> = None;
         let mut forget: Option<(String, String)> = None;
         let mut install_into: Option<String> = None;
-        let mut add_to: Option<String> = None;
-        let mut open_folder: Option<String> = None;
+        let mut run_program: Option<String> = None;
+        let mut open_files: Option<String> = None;
+        let mut open_shell: Option<String> = None;
+        let mut set_net: Option<(String, bool)> = None;
         let mut delete: Option<String> = None;
         for b in &self.boxes {
             let in_use = running.contains(&isolated_windows::boxes::container_name(&b.name));
+            let net = self.box_net.get(&b.name).copied().unwrap_or(false);
             egui::Frame::group(ui.style()).show(ui, |ui| {
                 ui.set_width(ui.available_width());
                 ui.horizontal(|ui| {
                     ui.label(RichText::new(&b.name).strong());
+                    let mut on = net;
+                    if ui
+                        .checkbox(&mut on, "Internet")
+                        .on_hover_text("Let apps in this container reach the internet")
+                        .changed()
+                    {
+                        set_net = Some((b.name.clone(), on));
+                    }
                     let profile = format!("profile {}", b.profile);
                     ui.label(weak(ui, profile).small());
                     if in_use {
                         ui.label(RichText::new("running").small().color(Color32::from_rgb(80, 160, 90)));
                     }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui.small_button("Delete box").clicked() {
+                        if ui.small_button("Delete").clicked() {
                             self.confirm_delete_box = Some(b.name.clone());
                         }
-                        if ui.small_button("Open folder").clicked() {
-                            open_folder = Some(b.name.clone());
+                        if ui.small_button("Install an app here...").clicked() {
+                            install_into = Some(b.name.clone());
                         }
                         if ui
-                            .small_button("Add program...")
-                            .on_hover_text("Save a program that is inside this box")
+                            .small_button("Run a program...")
+                            .on_hover_text("Start any program or script inside this container (it runs with the container's files)")
                             .clicked()
                         {
-                            add_to = Some(b.name.clone());
+                            run_program = Some(b.name.clone());
                         }
-                        if ui.small_button("Install another app here...").clicked() {
-                            install_into = Some(b.name.clone());
+                        if ui
+                            .small_button("Command prompt")
+                            .on_hover_text("Open a command prompt inside this container. Everything started from it stays in the container.")
+                            .clicked()
+                        {
+                            open_shell = Some(b.name.clone());
+                        }
+                        if ui
+                            .button(RichText::new("Open files").strong())
+                            .on_hover_text("Browse this container's files and copy out what its apps made")
+                            .clicked()
+                        {
+                            open_files = Some(b.name.clone());
                         }
                     });
                 });
                 if b.apps.is_empty() {
-                    ui.label(weak(ui, "No apps saved in this box yet."));
+                    ui.label(weak(ui, "No apps saved in this container yet."));
                 }
                 for a in &b.apps {
                     ui.horizontal(|ui| {
@@ -800,7 +1025,7 @@ impl App {
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             if ui
                                 .small_button("Remove")
-                                .on_hover_text("Remove from this list. The app's files stay in the box.")
+                                .on_hover_text("Remove from this list. The app's files stay in the container.")
                                 .clicked()
                             {
                                 forget = Some((b.name.clone(), a.path.clone()));
@@ -811,10 +1036,10 @@ impl App {
                 if self.confirm_delete_box.as_deref() == Some(b.name.as_str()) {
                     ui.horizontal_wrapped(|ui| {
                         ui.label(format!(
-                            "Delete box '{}' and everything installed in it, including the apps' settings and files?",
+                            "Delete container '{}' and everything in it, including its apps, their settings and the files they made?",
                             b.name
                         ));
-                        if ui.button("Delete box").clicked() {
+                        if ui.button("Delete container").clicked() {
                             delete = Some(b.name.clone());
                         }
                         if ui.button("Keep").clicked() {
@@ -844,43 +1069,91 @@ impl App {
                 None => self.open_install_form("", Some(&name)),
             }
         }
-        if let Some(name) = add_to {
-            if let (Some(p), Some(mut b)) = (shell::pick_program(), AppBox::load(&self.dirs, &name)) {
-                let app = BoxApp {
-                    name: p
-                        .file_stem()
-                        .map(|n| n.to_string_lossy().into_owned())
-                        .unwrap_or_else(|| "App".into()),
-                    path: p.to_string_lossy().into_owned(),
-                    args: Vec::new(),
-                };
-                b.add_apps(vec![app]);
-                match b.save(&self.dirs) {
-                    Ok(()) => self.set_status(format!("Saved {} in box '{name}'.", file_name(&p)), false),
-                    Err(e) => self.set_status(e, true),
-                }
-                self.last_refresh = None;
+        if let Some(name) = run_program {
+            if let Some(p) = shell::pick_program() {
+                self.run_in_box(&name, &p);
             }
         }
-        if let Some(name) = open_folder {
-            let policy = self
-                .boxes
-                .iter()
-                .find(|b| b.name == name)
-                .and_then(|b| self.store.load(&b.profile).ok())
-                .unwrap_or_default();
-            match isolated_windows::boxes::folder(&policy, &name) {
-                Ok(f) => shell::open(&f.to_string_lossy()),
+        if let Some(name) = open_shell {
+            match isolated_windows::spawn_self(&["box", "shell", &name]) {
+                Ok(()) => self.set_status(format!("Opened a command prompt inside '{name}'."), false),
                 Err(e) => self.set_status(e, true),
             }
+        }
+        if let Some((name, on)) = set_net {
+            self.set_box_internet(&name, on);
+        }
+        if let Some(name) = open_files {
+            self.open_box_files(&name);
         }
         if let Some(name) = delete {
             self.confirm_delete_box = None;
             match isolated_windows::boxes::remove(&self.dirs, &name) {
-                Ok(()) => self.set_status(format!("Deleted box '{name}'."), false),
+                Ok(()) => self.set_status(format!("Deleted container '{name}'."), false),
                 Err(e) => self.set_status(e, true),
             }
             self.last_refresh = None;
+        }
+    }
+
+    fn new_container_ui(&mut self, ui: &mut egui::Ui) {
+        let mut names: Vec<String> = self.builtin.iter().map(|e| e.policy.name.clone()).collect();
+        names.extend(self.user.iter().map(|e| e.policy.name.clone()));
+        let mut go = false;
+        let mut cancel = false;
+        let f = self.new_container.as_mut().unwrap();
+        egui::Frame::group(ui.style()).show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.label(RichText::new("New container").strong());
+            ui.add_space(4.0);
+            egui::Grid::new("new_container")
+                .num_columns(2)
+                .spacing([12.0, 6.0])
+                .show(ui, |ui| {
+                    ui.label("Name");
+                    let r = ui.add(
+                        egui::TextEdit::singleline(&mut f.name)
+                            .hint_text("for example AI apps")
+                            .desired_width(240.0),
+                    );
+                    if r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                        go = true;
+                    }
+                    ui.end_row();
+                    ui.label("Profile");
+                    egui::ComboBox::from_id_salt("new_container_profile")
+                        .selected_text(&f.profile)
+                        .show_ui(ui, |ui| {
+                            for n in &names {
+                                ui.selectable_value(&mut f.profile, n.clone(), n);
+                            }
+                        });
+                    ui.end_row();
+                });
+            ui.checkbox(&mut f.internet, "Allow internet (apps can download models, sign in, and so on)");
+            ui.label(
+                weak(
+                    ui,
+                    "Apps in the container cannot see your personal files. What they download or save goes into the container's own Documents, Downloads and Desktop.",
+                )
+                .small(),
+            );
+            if let Some(e) = &f.error {
+                ui.label(RichText::new(e).color(Color32::from_rgb(220, 80, 70)));
+            }
+            ui.horizontal(|ui| {
+                if ui.button(RichText::new("Create").strong()).clicked() {
+                    go = true;
+                }
+                if ui.button("Cancel").clicked() {
+                    cancel = true;
+                }
+            });
+        });
+        if cancel {
+            self.new_container = None;
+        } else if go {
+            self.create_container();
         }
     }
 
@@ -909,12 +1182,12 @@ impl App {
                         }
                     });
                     ui.end_row();
-                    ui.label("Box");
+                    ui.label("Container");
                     ui.horizontal(|ui| {
                         ui.add(egui::TextEdit::singleline(&mut f.box_name).desired_width(200.0));
                         if !box_names.is_empty() {
                             egui::ComboBox::from_id_salt("box_pick")
-                                .selected_text("Existing box")
+                                .selected_text("Existing container")
                                 .show_ui(ui, |ui| {
                                     for n in &box_names {
                                         if ui.selectable_label(f.box_name == *n, n).clicked() {
@@ -928,7 +1201,7 @@ impl App {
                     let existing = box_names.iter().any(|n| n.eq_ignore_ascii_case(f.box_name.trim()));
                     ui.label("Profile");
                     if existing {
-                        ui.label(weak(ui, "Uses the box's profile"));
+                        ui.label(weak(ui, "Uses the container's profile"));
                     } else {
                         egui::ComboBox::from_id_salt("install_profile")
                             .selected_text(&f.profile)
@@ -943,7 +1216,7 @@ impl App {
             ui.checkbox(&mut f.net, "Allow internet while installing (many installers download files)");
             ui.label(weak(
                 ui,
-                "The installer runs without administrator rights and installs into the box only. Apps installed later in the same box can see each other.",
+                "The installer runs without administrator rights and installs into the container only. Apps installed later in the same container can see each other.",
             ).small());
             if let Some(e) = &f.error {
                 ui.label(RichText::new(e).color(Color32::from_rgb(220, 80, 70)));
