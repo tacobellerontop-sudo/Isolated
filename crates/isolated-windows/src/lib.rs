@@ -38,6 +38,8 @@ pub struct LaunchRequest {
     /// Appended to the command line as is (for switches such as NSIS's
     /// `/D=` that must not be quoted).
     pub raw_tail: String,
+    /// Folder the program starts in, instead of its own folder.
+    pub workdir: Option<PathBuf>,
 }
 
 /// Live numbers for a running sandbox.
@@ -127,6 +129,13 @@ pub mod boxes {
             let _ = (policy, box_name);
             unsupported()
         }
+    }
+
+    /// The user folder apps in the box see (Documents, Downloads, Desktop
+    /// and their settings), created if needed. This is where their
+    /// creations usually are.
+    pub fn home(policy: &Policy, box_name: &str) -> Result<PathBuf> {
+        folder(policy, box_name).map(|f| f.join("Home"))
     }
 
     /// A drive letter mapped to a box folder while an installer runs (see
@@ -513,6 +522,14 @@ pub mod shell {
             let _ = lnk;
             None
         }
+    }
+
+    /// Asks users to pick any file.
+    pub fn pick_file() -> Option<PathBuf> {
+        #[cfg(windows)]
+        return crate::win::shell::pick_any();
+        #[cfg(not(windows))]
+        None
     }
 
     /// Asks users to pick an installer.

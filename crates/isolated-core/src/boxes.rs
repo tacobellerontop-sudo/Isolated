@@ -1,11 +1,14 @@
-//! App boxes: sandboxes that keep their files between runs, so users can run
-//! an installer inside one and launch the installed programs again later.
+//! App boxes (shown to users as "containers"): sandboxes that keep their
+//! files between runs, so users can install or download apps into one, run
+//! them again later, and browse and copy out what they made. Everything the
+//! apps write stays in the box's own folder.
 //!
 //! A box is a small TOML file in `%APPDATA%\Isolated\boxes` naming the
 //! profile it runs with and the programs saved in it. The files the programs
 //! install live in the box's private folder, which the platform backend owns.
 
 use crate::state::{now_unix, write_atomic, Dirs};
+use crate::{NetworkMode, Policy};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -19,6 +22,9 @@ pub struct AppBox {
     pub profile: String,
     /// Unix time the box was created.
     pub created: u64,
+    /// Internet access for apps in the box. `None` follows the profile.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub internet: Option<bool>,
     /// Programs users can start from the box.
     #[serde(rename = "app")]
     pub apps: Vec<BoxApp>,
@@ -30,6 +36,7 @@ impl Default for AppBox {
             name: String::new(),
             profile: crate::profile::DEFAULT_PROFILE.into(),
             created: now_unix(),
+            internet: None,
             apps: Vec::new(),
         }
     }
@@ -54,6 +61,25 @@ impl AppBox {
             profile: profile.to_string(),
             ..AppBox::default()
         }
+    }
+
+    /// Turns the box's profile into the policy its apps run with: private
+    /// folders are always kept, and the box's internet choice wins.
+    pub fn apply(&self, policy: &mut Policy) {
+        policy.filesystem.private_home = true;
+        match self.internet {
+            Some(true) => policy.network.mode = NetworkMode::Full,
+            Some(false) => policy.network.mode = NetworkMode::None,
+            None => {}
+        }
+    }
+
+    /// True if apps in the box can reach the internet with this profile.
+    pub fn has_internet(&self, profile: &Policy) -> bool {
+        self.internet.unwrap_or(matches!(
+            profile.network.mode,
+            NetworkMode::Full | NetworkMode::Allowlist
+        ))
     }
 
     fn path(dirs: &Dirs, name: &str) -> PathBuf {
@@ -374,6 +400,64 @@ pub fn per_user_args(kind: InstallerKind, dir: &str, has_user_args: bool) -> (Ve
     }
 }
 
+/// A name in `dir` like `name` that is not taken yet: `photo.png`, then
+/// `photo (2).png`, `photo (3).png`, ...
+pub fn free_name(dir: &Path, name: &str) -> PathBuf {
+    let first = dir.join(name);
+    if !first.exists() {
+        return first;
+    }
+    let p = Path::new(name);
+    let stem = p
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let ext = p
+        .extension()
+        .map(|e| format!(".{}", e.to_string_lossy()))
+        .unwrap_or_default();
+    (2..)
+        .map(|i| dir.join(format!("{stem} ({i}){ext}")))
+        .find(|c| !c.exists())
+        .unwrap()
+}
+
+/// Copies a file or a whole folder into `dest_dir`, never replacing what is
+/// there (a taken name gets a number). Links are skipped so a copy never
+/// leaves the folder it was asked for. Returns the new path.
+pub fn copy_into(src: &Path, dest_dir: &Path) -> Result<PathBuf, String> {
+    let name = src
+        .file_name()
+        .ok_or_else(|| format!("{} has no file name", src.display()))?
+        .to_string_lossy()
+        .into_owned();
+    let dest = free_name(dest_dir, &name);
+    let src_key = crate::profile::normalize_path_key(&src.to_string_lossy());
+    let dest_key = crate::profile::normalize_path_key(&dest.to_string_lossy());
+    if dest_key.starts_with(&format!("{src_key}\\")) {
+        return Err("A folder cannot be copied into itself.".into());
+    }
+    copy_any(src, &dest).map_err(|e| format!("could not copy {}: {e}", src.display()))?;
+    Ok(dest)
+}
+
+fn copy_any(src: &Path, dest: &Path) -> std::io::Result<()> {
+    let meta = fs::symlink_metadata(src)?;
+    if meta.file_type().is_symlink() {
+        return Ok(());
+    }
+    if meta.is_dir() {
+        fs::create_dir_all(dest)?;
+        for e in fs::read_dir(src)? {
+            let e = e?;
+            copy_any(&e.path(), &dest.join(e.file_name()))?;
+        }
+        Ok(())
+    } else {
+        fs::copy(src, dest).map(|_| ())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -425,6 +509,47 @@ mod tests {
         AppBox::remove(&dirs, "My App");
         assert!(AppBox::list(&dirs).is_empty());
         assert!(AppBox::new("bad/name", "strict").save(&dirs).is_err());
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn internet_choice_wins_over_profile() {
+        let mut b = AppBox::new("c", "strict");
+        let mut p = Policy::default();
+        p.filesystem.private_home = false;
+        assert!(!b.has_internet(&p));
+        b.apply(&mut p);
+        assert!(p.filesystem.private_home);
+        assert_eq!(p.network.mode, NetworkMode::None);
+        b.internet = Some(true);
+        assert!(b.has_internet(&p));
+        b.apply(&mut p);
+        assert_eq!(p.network.mode, NetworkMode::Full);
+        b.internet = Some(false);
+        b.apply(&mut p);
+        assert_eq!(p.network.mode, NetworkMode::None);
+        // Old box files without the field still load.
+        let old: AppBox = toml::from_str("name = \"x\"\nprofile = \"online\"\n").unwrap();
+        assert_eq!(old.internet, None);
+    }
+
+    #[test]
+    fn copies_files_and_folders_without_replacing() {
+        let root = std::env::temp_dir().join(format!("isolated-copy-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let src = root.join("src");
+        fs::create_dir_all(src.join("sub")).unwrap();
+        fs::write(src.join("a.txt"), "a").unwrap();
+        fs::write(src.join("sub").join("b.txt"), "b").unwrap();
+        let out = root.join("out");
+        fs::create_dir_all(&out).unwrap();
+        let f1 = copy_into(&src.join("a.txt"), &out).unwrap();
+        let f2 = copy_into(&src.join("a.txt"), &out).unwrap();
+        assert_eq!(f1.file_name().unwrap(), "a.txt");
+        assert_eq!(f2.file_name().unwrap(), "a (2).txt");
+        let d = copy_into(&src, &out).unwrap();
+        assert_eq!(fs::read_to_string(d.join("sub").join("b.txt")).unwrap(), "b");
+        assert!(copy_into(&src, &src.join("sub")).is_err());
         let _ = fs::remove_dir_all(&root);
     }
 

@@ -88,6 +88,33 @@ $code = Run-Sandboxed @("box", "delete", "SmokeFake")
 $left = @(Get-ChildItem -Path (Join-Path $env:LOCALAPPDATA "Packages") -Filter "isolated.box.SmokeFake*" -ErrorAction SilentlyContinue).Count
 Check "deleting a box removes it and its files (exit $code, $left left)" (($code -eq 0) -and -not (Test-Path $boxFile) -and ($left -eq 0))
 
+# 10b. Containers: an empty box made from scratch keeps what its apps save in
+#      its own folder (not the real user folders), has internet, and the
+#      internet switch blocks it again.
+$code = Run-Sandboxed @("box", "create", "SmokeC")
+Check "container is created (exit $code)" (($code -eq 0) -and (Test-Path (Join-Path $boxesDir "SmokeC.toml")))
+$realDoc = Join-Path ([Environment]::GetFolderPath("MyDocuments")) "isolated-creation.txt"
+Remove-Item $realDoc -ErrorAction SilentlyContinue
+$code = Run-Sandboxed @("container", "run", "SmokeC", $cmd, "/d", "/c", "echo made> %USERPROFILE%\Documents\isolated-creation.txt")
+$pkg = Get-ChildItem -Path (Join-Path $env:LOCALAPPDATA "Packages") -Filter "isolated.box.SmokeC*" -ErrorAction SilentlyContinue | Select-Object -First 1
+$inBox = $pkg -and (Test-Path (Join-Path $pkg.FullName "AC\Home\Documents\isolated-creation.txt"))
+Check "a file an app saves lands in the container, not the PC (exit $code)" (($code -eq 0) -and $inBox -and -not (Test-Path $realDoc))
+$code = Run-Sandboxed @("box", "run", "SmokeC", $cmd, "/d", "/c", "cd> %USERPROFILE%\cwd.txt")
+$cwd = if ($pkg) { Get-Content (Join-Path $pkg.FullName "AC\Home\cwd.txt") -ErrorAction SilentlyContinue } else { "" }
+Check "programs from the PC start in the container's user folder ($cwd)" ("$cwd" -match "\\AC\\Home$")
+# Sandboxes cannot write to NUL, so save the page in the container's user
+# folder, where programs from the PC start.
+$code = Run-Sandboxed @("box", "run", "SmokeC", $curl, "-s", "-m", "30", "-o", "page.html", "https://github.com")
+$page = if ($pkg) { Join-Path $pkg.FullName "AC\Home\page.html" } else { "" }
+Check "container has internet and the download lands in it (exit $code)" (($code -eq 0) -and $page -and (Test-Path $page))
+$code = Run-Sandboxed @("box", "net", "SmokeC", "off")
+$code2 = Run-Sandboxed @("box", "run", "SmokeC", $curl, "-s", "-m", "15", "-o", "NUL", "https://github.com")
+Check "internet switch blocks the container (exit $code, curl $code2)" (($code -eq 0) -and ($code2 -ne 0))
+$code = Run-Sandboxed @("box", "run", "SmokeC", $cmd, "/d", "/c", "type `"$secret`"")
+Check "apps in a container can't read user files (exit $code)" ($code -ne 0)
+$code = Run-Sandboxed @("box", "delete", "SmokeC")
+Check "container is deleted (exit $code)" (($code -eq 0) -and -not (Test-Path (Join-Path $boxesDir "SmokeC.toml")))
+
 # 11. A real Inno Setup installer that asks for admin rights installs per-user
 #     into a box, with its Start menu shortcut found.
 $iscc = @("${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe", "$env:ProgramFiles\Inno Setup 6\ISCC.exe") | Where-Object { Test-Path $_ } | Select-Object -First 1

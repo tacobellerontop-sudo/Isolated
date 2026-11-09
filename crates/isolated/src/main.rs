@@ -32,6 +32,11 @@ Usage:
                                         Start an app saved in a box (by name or path)
   isolated box options <installer>      Choose the box and network in a dialog, then install
   isolated box list                     List boxes and their apps
+  isolated box create <box> [--profile <name>] [--net | --no-net]
+                                        Make an empty box (internet allowed unless --no-net)
+  isolated box shell <box>              Open a command prompt inside a box
+  isolated box files <box>              Show a box's files in Explorer (prints the folder)
+  isolated box net <box> on|off|profile Allow or block internet for apps in a box
   isolated box add <box> <program> [--name <name>]
                                         Save a program inside a box as an app
   isolated box forget <box> <app>       Remove an app from a box's list (files are kept)
@@ -48,6 +53,9 @@ Usage:
   isolated update [--check]             Update to the latest release
   isolated repair                       Remove folder access left by interrupted sandboxes
   isolated --version
+
+'container' works everywhere 'box' does: a box is what the window calls a
+container.
 
 Run options:
   --profile <name>        Use this profile (default: the program's saved profile, or strict)
@@ -144,7 +152,7 @@ fn dispatch(args: Vec<OsString>, out: &Out) -> Result<ExitCode, String> {
             let target = single_path(&mut parser)?;
             Ok(gui(isolated_gui::Start::Options(target)))
         }
-        "box" | "boxes" => app_box(parser, &dirs, out),
+        "box" | "boxes" | "container" | "containers" => app_box(parser, &dirs, out),
         "ps" | "list" => ps(&dirs, out),
         "kill" | "stop" => {
             let id = single_value(&mut parser, "a sandbox id")?;
@@ -383,6 +391,7 @@ fn run(mut parser: lexopt::Parser, dirs: &Dirs, out: &Out) -> Result<ExitCode, S
         app_box: None,
         installer: false,
         raw_tail: String::new(),
+        workdir: None,
     };
     let sandbox = isolated_windows::launch(dirs, &policy, &req)?;
     out.info(&format!(
@@ -530,8 +539,49 @@ fn box_policy(store: &ProfileStore, b: &AppBox) -> Result<Policy, String> {
     let mut policy = store
         .load(&b.profile)
         .map_err(|e| format!("box '{}' uses profile '{}': {e}", b.name, b.profile))?;
-    policy.filesystem.private_home = true;
+    b.apply(&mut policy);
     Ok(policy)
+}
+
+/// Runs a program inside a box and waits for it, like `box run`.
+#[allow(clippy::too_many_arguments)]
+fn box_launch(
+    dirs: &Dirs,
+    store: &ProfileStore,
+    b: &AppBox,
+    target: PathBuf,
+    args: Vec<String>,
+    mut accept_weaker: bool,
+    workdir: Option<PathBuf>,
+    label: &str,
+    out: &Out,
+) -> Result<ExitCode, String> {
+    let mut policy = box_policy(store, b)?;
+    if policy.filesystem.ask_for_folders && !choose_folders(dirs, &target, &mut policy)? {
+        return Ok(ExitCode::from(1));
+    }
+    let _ = isolated_windows::repair(dirs);
+    if !accept_gaps(&policy, &mut accept_weaker, out)? {
+        return Ok(ExitCode::from(1));
+    }
+    let req = LaunchRequest {
+        profile_name: policy.name.clone(),
+        target,
+        args,
+        accept_weaker,
+        app_box: Some(b.name.clone()),
+        installer: false,
+        raw_tail: String::new(),
+        workdir,
+    };
+    let sandbox = isolated_windows::launch(dirs, &policy, &req)?;
+    out.info(&format!(
+        "Started {label} from box {} in sandbox {}.",
+        b.name,
+        sandbox.id()
+    ));
+    let code = sandbox.wait()?;
+    Ok(ExitCode::from(code.min(255) as u8))
 }
 
 fn load_box(dirs: &Dirs, name: &str) -> Result<AppBox, String> {
@@ -603,31 +653,103 @@ fn app_box(mut parser: lexopt::Parser, dirs: &Dirs, out: &Out) -> Result<ExitCod
                 ));
             }
             all_args.extend(args);
-            let mut policy = box_policy(&store, &b)?;
-            if policy.filesystem.ask_for_folders && !choose_folders(dirs, &target, &mut policy)? {
-                return Ok(ExitCode::from(1));
+            // Programs from outside the box start in the box's user folder,
+            // so what they save lands with the box's other files.
+            let folder = isolated_windows::boxes::folder(&box_policy(&store, &b)?, &b.name)?;
+            let inside = isolated_core::profile::normalize_path_key(&target.to_string_lossy())
+                .starts_with(&isolated_core::profile::normalize_path_key(&folder.to_string_lossy()));
+            let workdir = (!inside).then(|| folder.join("Home"));
+            box_launch(dirs, &store, &b, target, all_args, accept_weaker, workdir, &app, out)
+        }
+        "create" | "new" => {
+            let mut name: Option<String> = None;
+            let mut profile: Option<String> = None;
+            let mut internet = true;
+            while let Some(arg) = parser.next().map_err(|e| e.to_string())? {
+                match arg {
+                    Long("profile") | Short('p') => {
+                        profile = Some(os_string(parser.value().map_err(|e| e.to_string())?)?)
+                    }
+                    Long("net") => internet = true,
+                    Long("no-net") | Long("offline") => internet = false,
+                    Value(v) if name.is_none() => name = Some(os_string(v)?),
+                    other => return Err(other.unexpected().to_string()),
+                }
             }
-            let _ = isolated_windows::repair(dirs);
-            if !accept_gaps(&policy, &mut accept_weaker, out)? {
-                return Ok(ExitCode::from(1));
+            let name = name.ok_or("usage: isolated box create <box> [--profile <name>] [--net | --no-net]")?;
+            let name = name.trim().to_string();
+            isolated_core::boxes::check_name(&name)?;
+            if AppBox::exists(dirs, &name) {
+                return Err(format!("A box named '{name}' already exists."));
             }
-            let req = LaunchRequest {
-                profile_name: policy.name.clone(),
-                target: target.clone(),
-                args: all_args,
-                accept_weaker,
-                app_box: Some(b.name.clone()),
-                installer: false,
-                raw_tail: String::new(),
-            };
-            let sandbox = isolated_windows::launch(dirs, &policy, &req)?;
+            let profile = profile.unwrap_or_else(|| "online".into());
+            store.load(&profile)?;
+            let mut b = AppBox::new(&name, &profile);
+            b.internet = Some(internet);
+            let folder = isolated_windows::boxes::folder(&box_policy(&store, &b)?, &b.name)?;
+            b.save(dirs)?;
             out.info(&format!(
-                "Started {app} from box {} in sandbox {}.",
-                b.name,
-                sandbox.id()
+                "Created box {name} ({}). Its files are in {}",
+                if internet { "internet allowed" } else { "no internet" },
+                folder.join("Home").display()
             ));
-            let code = sandbox.wait()?;
-            Ok(ExitCode::from(code.min(255) as u8))
+            Ok(ExitCode::SUCCESS)
+        }
+        "shell" | "cmd" | "enter" => {
+            let box_name = single_value(&mut parser, "a box name")?;
+            let b = load_box(dirs, &box_name)?;
+            let home = isolated_windows::boxes::home(&box_policy(&store, &b)?, &b.name)?;
+            let comspec = std::env::var_os("ComSpec")
+                .map(PathBuf::from)
+                .unwrap_or_else(|| PathBuf::from(r"C:\Windows\System32\cmd.exe"));
+            let banner = format!(
+                "title Isolated box: {0} & echo You are inside box {0}. Programs started here stay in the box, and files saved here stay in its folder. & echo.",
+                b.name
+            );
+            box_launch(
+                dirs,
+                &store,
+                &b,
+                comspec,
+                vec!["/k".into(), banner],
+                false,
+                Some(home),
+                "a command prompt",
+                out,
+            )
+        }
+        "files" | "open" | "explore" => {
+            let box_name = single_value(&mut parser, "a box name")?;
+            let b = load_box(dirs, &box_name)?;
+            let home = isolated_windows::boxes::home(&box_policy(&store, &b)?, &b.name)?;
+            out.info(&home.to_string_lossy());
+            if !out.console {
+                shell::open(&home.to_string_lossy());
+            }
+            Ok(ExitCode::SUCCESS)
+        }
+        "net" | "internet" => {
+            let box_name = single_value(&mut parser, "a box name")?;
+            let choice = single_value(&mut parser, "on, off or profile")?;
+            let mut b = load_box(dirs, &box_name)?;
+            b.internet = match choice.to_ascii_lowercase().as_str() {
+                "on" | "yes" | "true" | "allow" => Some(true),
+                "off" | "no" | "false" | "block" => Some(false),
+                "profile" | "default" => None,
+                other => return Err(format!("expected on, off or profile, not '{other}'")),
+            };
+            b.save(dirs)?;
+            let policy = box_policy(&store, &b)?;
+            out.info(&format!(
+                "Internet for box {} is now {}. Apps already running keep their old setting until restarted.",
+                b.name,
+                if policy.network.mode == NetworkMode::None {
+                    "blocked"
+                } else {
+                    "allowed"
+                }
+            ));
+            Ok(ExitCode::SUCCESS)
         }
         "add" => {
             let box_name = single_value(&mut parser, "a box name")?;
@@ -797,6 +919,7 @@ fn box_install(mut parser: lexopt::Parser, dirs: &Dirs, store: &ProfileStore, ou
         app_box: Some(b.name.clone()),
         installer: true,
         raw_tail,
+        workdir: None,
     };
     let sandbox = isolated_windows::launch(dirs, &policy, &req)?;
     out.info(&format!(

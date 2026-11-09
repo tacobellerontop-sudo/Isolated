@@ -7,8 +7,10 @@ Isolated starts the program with nothing: no access to your files, no
 network, no clipboard. You grant only what it needs.
 
 - **Right-click → Run in Isolated** on any `.exe`, shortcut, `.bat`, `.cmd` or `.ps1`.
-- **Install apps into a box:** run an installer in a sandbox that keeps its
-  files, then start the installed app from the box whenever you like.
+- **Containers:** separate spaces with their own files and, if you like,
+  internet. Install or download apps (AI tools, for example) into one, and
+  everything they save stays inside it instead of on your PC. Open its
+  files to copy out what you made.
 - **Small and quiet:** one ~4 MB exe, no installer framework, no background
   service, nothing running when no sandbox is.
 - **No admin rights:** uses Windows AppContainer, Job Objects and per-user
@@ -48,13 +50,37 @@ entry is under **Show more options**. The submenu has:
 sandboxes with a Stop button, and holds settings. Drop a program on it to
 create a profile.
 
+**Containers.** In the window's **Containers** tab, choose **New
+container...**, give it a name (for example `AI apps`) and choose whether
+its apps may use the internet. Then:
+
+- **Install an app here...** runs an installer inside it (see below).
+- **Run a program...** starts any program or script from your PC inside
+  it, such as a portable app you downloaded. It starts in the container's
+  own user folder, so what it saves lands there.
+- **Command prompt** opens `cmd` inside the container, for tools you set up
+  from a terminal. Everything started from it stays in the container.
+- **Open files** shows the container's files: its own Documents, Downloads,
+  Desktop and Programs. Copy anything to your PC with **Copy to PC...**, add
+  files by dropping them on the view, and start programs with **Run here**
+  (**Open in Explorer** is there too, but programs opened from Explorer run
+  outside the container).
+- The **Internet** switch allows or blocks the network for the container's
+  apps from their next start.
+
+Apps in a container cannot see your personal files, and Windows keeps
+everything they write in the container's folder, so nothing is left on
+your PC. Deleting a container removes all of it. A container is the same
+thing as a box below; `isolated container ...` and `isolated box ...` are
+the same commands.
+
 **Installed apps.** To keep an app instead of running it once, right-click
 its installer and choose **Install in Isolated...**, or use **Install an
-app...** in the window's **Installed apps** tab. Pick a box (a new one is
+app...** in the window's **Containers** tab. Pick a box (a new one is
 named after the app) and whether the installer may use the internet. The
 installer runs inside the box without administrator rights, and when it
 finishes, Isolated saves the programs it created. They appear under
-**Installed apps** with a **Run** button, and run with the box's profile,
+the box in **Containers** with a **Run** button, and run with the box's profile,
 so they still cannot see your files. Each box keeps its own files and
 settings; apps installed into the same box can see each other. Deleting a
 box removes everything installed in it.
@@ -101,6 +127,10 @@ isolated box install --box 7-Zip -- .\7z2408-x64.msi
 isolated box install --box Editor -- .\EditorSetup.exe
 isolated box list
 isolated box run Editor "Editor"
+isolated container create "AI apps"
+isolated container run "AI apps" .\portable-tool.exe
+isolated container shell "AI apps"
+isolated container net "AI apps" off
 isolated ps
 isolated kill <id>
 isolated update

@@ -71,6 +71,10 @@ pub fn pick(folder: bool) -> Option<PathBuf> {
     pick_with(folder, "Programs and scripts", "*.exe;*.lnk;*.bat;*.cmd;*.ps1;*.com")
 }
 
+pub fn pick_any() -> Option<PathBuf> {
+    pick_with(false, "All files", "*.*")
+}
+
 pub fn pick_installer() -> Option<PathBuf> {
     pick_with(false, "Installers", "*.exe;*.msi")
 }
