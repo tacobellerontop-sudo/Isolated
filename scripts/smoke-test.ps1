@@ -102,8 +102,11 @@ Check "a file an app saves lands in the container, not the PC (exit $code)" (($c
 $code = Run-Sandboxed @("box", "run", "SmokeC", $cmd, "/d", "/c", "cd> %USERPROFILE%\cwd.txt")
 $cwd = if ($pkg) { Get-Content (Join-Path $pkg.FullName "AC\Home\cwd.txt") -ErrorAction SilentlyContinue } else { "" }
 Check "programs from the PC start in the container's user folder ($cwd)" ("$cwd" -match "\\AC\\Home$")
-$code = Run-Sandboxed @("box", "run", "SmokeC", $curl, "-s", "-m", "30", "-o", "NUL", "https://github.com")
-Check "container has internet (exit $code)" ($code -eq 0)
+# Sandboxes cannot write to NUL, so save the page in the container's user
+# folder, where programs from the PC start.
+$code = Run-Sandboxed @("box", "run", "SmokeC", $curl, "-s", "-m", "30", "-o", "page.html", "https://github.com")
+$page = if ($pkg) { Join-Path $pkg.FullName "AC\Home\page.html" } else { "" }
+Check "container has internet and the download lands in it (exit $code)" (($code -eq 0) -and $page -and (Test-Path $page))
 $code = Run-Sandboxed @("box", "net", "SmokeC", "off")
 $code2 = Run-Sandboxed @("box", "run", "SmokeC", $curl, "-s", "-m", "15", "-o", "NUL", "https://github.com")
 Check "internet switch blocks the container (exit $code, curl $code2)" (($code -eq 0) -and ($code2 -ne 0))
