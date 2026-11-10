@@ -222,6 +222,16 @@ $code = Run-Sandboxed @("run", "--", "$isoDir\bin\cmd.exe", "/d", "/c", "type `"
 Check "program in an isolated folder can read and write the folder (exit $code)" (($code -eq 0) -and ((Get-Content "$isoDir\out.txt" -ErrorAction SilentlyContinue) -match "folder file"))
 $code = Run-Sandboxed @("run", "--", "$isoDir\bin\cmd.exe", "/d", "/c", "type `"$secret`"")
 Check "program in an isolated folder cannot read files outside it (exit $code)" ($code -ne 0)
+# What a program in an isolated folder sees as its user folders (Unity games
+# save to LocalAppDataLow and quit when they cannot).
+Copy-Item $Exe "$isoDir\bin\probe.exe"
+$code = Run-Sandboxed @("run", "--", "$isoDir\bin\probe.exe", "diag-folders", "$isoDir\diag.txt")
+Write-Host "Known folders inside an isolated folder (exit $code):"
+Get-Content "$isoDir\diag.txt" -ErrorAction SilentlyContinue | ForEach-Object { Write-Host "    $_" }
+foreach ($kf in @("LocalAppDataLow", "LocalAppData")) {
+    $line = Get-Content "$isoDir\diag.txt" -ErrorAction SilentlyContinue | Where-Object { $_ -match "^$kf = " }
+    Check "$kf is the sandbox's own writable folder ($line)" (("$line" -match "writable: true") -and ("$line" -match "\\Packages\\isolated\."))
+}
 $acl = (icacls $isoDir) -join "`n"
 Check "isolated folder grants are removed afterwards" (-not ($acl -match "S-1-15-2-"))
 $code = Run-Sandboxed @("folder", "remove", $isoDir)

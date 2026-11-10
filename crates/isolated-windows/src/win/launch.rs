@@ -476,6 +476,14 @@ fn make_private_dirs(base: &Path, with_home: bool) -> Result<PrivateDirs> {
     let temp = base.join("Temp");
     let mut dirs = vec![temp.clone()];
     if with_home {
+        // Inside an AppContainer, Windows puts the LocalAppData and LocalLow
+        // known folders at <user folder>\AppData\Local\Packages\<container>\AC
+        // and fails with "path not found" when that is missing. Apps such as
+        // Unity games quit at startup without them, so it exists up front.
+        let is_container_folder = base.file_name().is_some_and(|n| n.eq_ignore_ascii_case("AC"));
+        if let Some(container) = base.parent().and_then(Path::file_name).filter(|_| is_container_folder) {
+            dirs.push(home.join(r"AppData\Local\Packages").join(container).join("AC"));
+        }
         // Start menu and Programs folders exist up front so installers that
         // look them up find them inside the sandbox.
         dirs.push(home.join(r"AppData\Roaming\Microsoft\Windows\Start Menu\Programs"));

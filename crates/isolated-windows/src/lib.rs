@@ -540,6 +540,45 @@ pub mod shell {
         }
     }
 
+    /// The user's known folders as this process sees them (for diagnosing
+    /// what a sandboxed app gets), as (name, path).
+    pub fn known_folders() -> Vec<(&'static str, Option<PathBuf>)> {
+        #[cfg(windows)]
+        {
+            use crate::win::shell::{known_folder, KnownFolder as K};
+            vec![
+                ("Profile", known_folder(K::Profile)),
+                ("Documents", known_folder(K::Documents)),
+                ("Desktop", known_folder(K::Desktop)),
+                ("Downloads", known_folder(K::Downloads)),
+                ("LocalAppDataLow", known_folder(K::LocalAppDataLow)),
+                ("RoamingAppData", known_folder(K::RoamingAppData)),
+                ("LocalAppData", known_folder(K::LocalAppData)),
+            ]
+        }
+        #[cfg(not(windows))]
+        Vec::new()
+    }
+
+    /// For diagnosis: how Windows resolves the folders apps save to.
+    pub fn known_folders_detail() -> Vec<(&'static str, String)> {
+        #[cfg(windows)]
+        {
+            use crate::win::shell::{known_folder_detail, KnownFolder as K};
+            [
+                ("Profile", K::Profile),
+                ("LocalAppDataLow", K::LocalAppDataLow),
+                ("LocalAppData", K::LocalAppData),
+                ("RoamingAppData", K::RoamingAppData),
+            ]
+            .into_iter()
+            .map(|(n, k)| (n, known_folder_detail(k)))
+            .collect()
+        }
+        #[cfg(not(windows))]
+        Vec::new()
+    }
+
     /// Asks users to pick any file.
     pub fn pick_file() -> Option<PathBuf> {
         #[cfg(windows)]

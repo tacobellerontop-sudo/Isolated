@@ -231,6 +231,31 @@ fn dispatch(args: Vec<OsString>, out: &Out) -> Result<ExitCode, String> {
             }
             Ok(ExitCode::SUCCESS)
         }
+        // Hidden: writes the known folders this process sees, and whether
+        // each can be written, to a file. Run inside a sandbox to see what
+        // apps get.
+        "diag-folders" => {
+            let file = single_path(&mut parser)?;
+            let mut text = String::new();
+            for (name, path) in shell::known_folders() {
+                let writable = path.as_ref().is_some_and(|p| {
+                    let probe = p.join(".isolated-probe");
+                    let ok = std::fs::create_dir_all(p).is_ok() && std::fs::write(&probe, b"x").is_ok();
+                    let _ = std::fs::remove_file(&probe);
+                    ok
+                });
+                let shown = path.map(|p| p.display().to_string()).unwrap_or_else(|| "(none)".into());
+                text.push_str(&format!("{name} = {shown} (writable: {writable})\n"));
+            }
+            for (name, detail) in shell::known_folders_detail() {
+                text.push_str(&format!("{name}: {detail}\n"));
+            }
+            for var in ["USERPROFILE", "APPDATA", "LOCALAPPDATA", "TEMP"] {
+                text.push_str(&format!("%{var}% = {}\n", std::env::var(var).unwrap_or_default()));
+            }
+            std::fs::write(&file, text).map_err(|e| format!("{}: {e}", file.display()))?;
+            Ok(ExitCode::SUCCESS)
+        }
         "repair" => {
             let n = isolated_windows::repair(&dirs)?;
             out.info(&format!("Repaired {n} interrupted sandbox(es)."));
