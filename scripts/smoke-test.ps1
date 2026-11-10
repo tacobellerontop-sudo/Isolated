@@ -236,6 +236,8 @@ Set-Content -Path "$isoDir\bin\probe_Data\app.info" -Value "IsolatedSmokeCo`nSmo
 $low = Join-Path $env:USERPROFILE "AppData\LocalLow"
 Set-Content -Path "$low\isolated-smoke-secret.txt" -Value "other app's data"
 $code = Run-Sandboxed @("run", "--", "$isoDir\bin\probe.exe", "diag-folders", "$isoDir\diag2.txt", "IsolatedSmokeCo\SmokeGame")
+Write-Host "User Shell Folders on this PC:"
+Get-ItemProperty "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\User Shell Folders" | Out-String | Write-Host
 Write-Host "Known folders for a Unity game (exit $code):"
 Get-Content "$isoDir\diag2.txt" -ErrorAction SilentlyContinue | ForEach-Object { Write-Host "    $_" }
 $diag2 = (Get-Content "$isoDir\diag2.txt" -ErrorAction SilentlyContinue) -join "`n"

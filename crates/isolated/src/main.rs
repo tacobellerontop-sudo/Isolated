@@ -257,6 +257,9 @@ fn dispatch(args: Vec<OsString>, out: &Out) -> Result<ExitCode, String> {
                 let shown = path.map(|p| p.display().to_string()).unwrap_or_else(|| "(none)".into());
                 text.push_str(&format!("{name} = {shown} (writable: {writable})\n"));
             }
+            for (name, detail) in shell::known_folders_detail() {
+                text.push_str(&format!("{name}: {detail}\n"));
+            }
             for var in ["USERPROFILE", "APPDATA", "LOCALAPPDATA", "TEMP"] {
                 text.push_str(&format!("%{var}% = {}\n", std::env::var(var).unwrap_or_default()));
             }

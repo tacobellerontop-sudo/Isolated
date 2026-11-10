@@ -560,6 +560,25 @@ pub mod shell {
         Vec::new()
     }
 
+    /// For diagnosis: how Windows resolves the folders apps save to.
+    pub fn known_folders_detail() -> Vec<(&'static str, String)> {
+        #[cfg(windows)]
+        {
+            use crate::win::shell::{known_folder_detail, KnownFolder as K};
+            [
+                ("Profile", K::Profile),
+                ("LocalAppDataLow", K::LocalAppDataLow),
+                ("LocalAppData", K::LocalAppData),
+                ("RoamingAppData", K::RoamingAppData),
+            ]
+            .into_iter()
+            .map(|(n, k)| (n, known_folder_detail(k)))
+            .collect()
+        }
+        #[cfg(not(windows))]
+        Vec::new()
+    }
+
     /// Asks users to pick any file.
     pub fn pick_file() -> Option<PathBuf> {
         #[cfg(windows)]

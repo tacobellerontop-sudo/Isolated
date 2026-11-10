@@ -13,7 +13,7 @@ use windows::Win32::UI::Shell::{
     FOLDERID_Desktop, FOLDERID_Documents, FOLDERID_Downloads, FOLDERID_LocalAppData, FOLDERID_LocalAppDataLow,
     FOLDERID_Profile, FOLDERID_Programs, FOLDERID_RoamingAppData, FileOpenDialog, IFileOpenDialog, IShellLinkW,
     SHGetKnownFolderPath, ShellExecuteW, ShellLink, FOS_FORCEFILESYSTEM, FOS_PICKFOLDERS, KF_FLAG_DEFAULT,
-    SIGDN_FILESYSPATH, SLR_NO_UI,
+    KF_FLAG_DONT_VERIFY, KF_FLAG_NO_ALIAS, KNOWN_FOLDER_FLAG, SIGDN_FILESYSPATH, SLR_NO_UI,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     MessageBoxW, IDYES, MB_ICONERROR, MB_ICONINFORMATION, MB_ICONWARNING, MB_OK, MB_SETFOREGROUND, MB_YESNO,
@@ -127,8 +127,8 @@ pub enum KnownFolder {
     StartMenuPrograms,
 }
 
-pub fn known_folder(f: KnownFolder) -> Option<PathBuf> {
-    let id: &GUID = match f {
+fn folder_id(f: KnownFolder) -> &'static GUID {
+    match f {
         KnownFolder::Profile => &FOLDERID_Profile,
         KnownFolder::Downloads => &FOLDERID_Downloads,
         KnownFolder::Desktop => &FOLDERID_Desktop,
@@ -137,7 +137,32 @@ pub fn known_folder(f: KnownFolder) -> Option<PathBuf> {
         KnownFolder::RoamingAppData => &FOLDERID_RoamingAppData,
         KnownFolder::LocalAppData => &FOLDERID_LocalAppData,
         KnownFolder::StartMenuPrograms => &FOLDERID_Programs,
+    }
+}
+
+/// For diagnosis: the folder's path or error with default flags, and the
+/// path Windows computes without checking it exists.
+pub fn known_folder_detail(f: KnownFolder) -> String {
+    let get = |flags: KNOWN_FOLDER_FLAG| unsafe {
+        match SHGetKnownFolderPath(folder_id(f), flags, None) {
+            Ok(p) => {
+                let s = from_wide_ptr(p.0);
+                CoTaskMemFree(Some(p.0 as *const _));
+                s
+            }
+            Err(e) => format!("error 0x{:08x}", e.code().0),
+        }
     };
+    format!(
+        "default: {} | dont_verify: {} | no_alias: {}",
+        get(KF_FLAG_DEFAULT),
+        get(KF_FLAG_DONT_VERIFY),
+        get(KF_FLAG_NO_ALIAS)
+    )
+}
+
+pub fn known_folder(f: KnownFolder) -> Option<PathBuf> {
+    let id = folder_id(f);
     unsafe {
         let p = SHGetKnownFolderPath(id, KF_FLAG_DEFAULT, None).ok()?;
         let s = from_wide_ptr(p.0);
