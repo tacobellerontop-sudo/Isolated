@@ -236,7 +236,17 @@ fn dispatch(args: Vec<OsString>, out: &Out) -> Result<ExitCode, String> {
         // apps get.
         "diag-folders" => {
             let file = single_path(&mut parser)?;
+            // Optional: a folder under LocalLow to test writing to.
+            let low_sub = single_path(&mut parser).ok();
             let mut text = String::new();
+            if let Some(sub) = low_sub {
+                let low = shell::known_folders()
+                    .into_iter()
+                    .find(|(n, _)| *n == "LocalAppDataLow")
+                    .and_then(|(_, p)| p);
+                let ok = low.is_some_and(|l| std::fs::write(l.join(sub).join("probe.txt"), b"x").is_ok());
+                text.push_str(&format!("LocalLowSub writable: {ok}\n"));
+            }
             for (name, path) in shell::known_folders() {
                 let writable = path.as_ref().is_some_and(|p| {
                     let probe = p.join(".isolated-probe");

@@ -228,8 +228,26 @@ Copy-Item $Exe "$isoDir\bin\probe.exe"
 $code = Run-Sandboxed @("run", "--", "$isoDir\bin\probe.exe", "diag-folders", "$isoDir\diag.txt")
 Write-Host "Known folders inside an isolated folder (exit $code):"
 Get-Content "$isoDir\diag.txt" -ErrorAction SilentlyContinue | ForEach-Object { Write-Host "    $_" }
-$lowLine = Get-Content "$isoDir\diag.txt" -ErrorAction SilentlyContinue | Where-Object { $_ -match "^LocalAppDataLow" }
-Check "LocalLow is writable inside an isolated folder ($lowLine)" ("$lowLine" -match "writable: true")
+# A Unity game (here: the probe with a Unity data folder next to it) gets
+# LocalLow and its own LocalLow\<company>\<product> folder, and nothing else
+# in LocalLow.
+New-Item -ItemType Directory -Force -Path "$isoDir\bin\probe_Data" | Out-Null
+Set-Content -Path "$isoDir\bin\probe_Data\app.info" -Value "IsolatedSmokeCo`nSmokeGame"
+$low = Join-Path $env:USERPROFILE "AppData\LocalLow"
+Set-Content -Path "$low\isolated-smoke-secret.txt" -Value "other app's data"
+$code = Run-Sandboxed @("run", "--", "$isoDir\bin\probe.exe", "diag-folders", "$isoDir\diag2.txt", "IsolatedSmokeCo\SmokeGame")
+Write-Host "Known folders for a Unity game (exit $code):"
+Get-Content "$isoDir\diag2.txt" -ErrorAction SilentlyContinue | ForEach-Object { Write-Host "    $_" }
+$diag2 = (Get-Content "$isoDir\diag2.txt" -ErrorAction SilentlyContinue) -join "`n"
+Check "a Unity game is given its LocalLow folder" ($diag2 -match "LocalAppDataLow = .*LocalLow")
+Check "a Unity game can write its own LocalLow folder" ($diag2 -match "LocalLowSub writable: true")
+Check "the Unity save folder is on the PC" (Test-Path "$low\IsolatedSmokeCo\SmokeGame\probe.txt")
+$code = Run-Sandboxed @("run", "--", "$isoDir\bin\probe.exe", "diag-folders", "$isoDir\diag3.txt", "..")
+$diag3 = (Get-Content "$isoDir\diag3.txt" -ErrorAction SilentlyContinue) -join "`n"
+Check "a Unity game cannot write elsewhere in LocalLow" ($diag3 -match "LocalLowSub writable: false")
+$lowAcl = (icacls $low) -join "`n"
+Check "LocalLow grants are removed afterwards" (-not ($lowAcl -match "S-1-15-2-"))
+Remove-Item -Recurse -Force "$low\IsolatedSmokeCo", "$low\isolated-smoke-secret.txt" -ErrorAction SilentlyContinue
 $acl = (icacls $isoDir) -join "`n"
 Check "isolated folder grants are removed afterwards" (-not ($acl -match "S-1-15-2-"))
 $code = Run-Sandboxed @("folder", "remove", $isoDir)

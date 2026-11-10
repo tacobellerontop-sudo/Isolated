@@ -312,6 +312,16 @@ fn isolated_folder(policy: &Policy) -> Result<Option<PathBuf>> {
     Ok(Some(p))
 }
 
+/// The company and product names of a Unity game, from the `app.info` file
+/// next to it (`<game>_Data\app.info`: company on the first line, product
+/// on the second). None for other programs or names unsafe as folder names.
+fn unity_names(program: &Path) -> Option<(String, String)> {
+    let dir = program.parent()?;
+    let stem = program.file_stem()?.to_string_lossy().into_owned();
+    let info = std::fs::read_to_string(dir.join(format!("{stem}_Data")).join("app.info")).ok()?;
+    isolated_core::profile::unity_app_info(&info)
+}
+
 /// Checks that a folder can be isolated (all its programs get to read and
 /// change it).
 pub fn check_isolated_folder(raw: &str) -> Result<()> {
@@ -348,6 +358,20 @@ fn grants_for(policy: &Policy, program: &Path) -> Result<Vec<Grant>> {
             // Programs inside the isolated folder can already read themselves.
             if !folder.as_ref().is_some_and(|f| under(&p, f)) {
                 push(p, Access::Read, &mut out);
+            }
+        }
+    }
+    if let Some((company, product)) = unity_names(program) {
+        // Unity games keep their log, settings and saves in
+        // LocalLow\<company>\<product> and quit at startup when Windows
+        // cannot hand them the LocalLow folder. Let the game see that
+        // LocalLow exists (nothing in it) and use its own folder there.
+        if let Some(low) = shell::known_folder(shell::KnownFolder::LocalAppDataLow) {
+            let own = low.join(&company).join(&product);
+            if std::fs::create_dir_all(&own).is_ok() {
+                push(low.clone(), Access::Attributes, &mut out);
+                push(low.join(&company), Access::Attributes, &mut out);
+                push(own, Access::Write, &mut out);
             }
         }
     }
