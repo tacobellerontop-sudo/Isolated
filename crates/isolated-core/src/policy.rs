@@ -21,6 +21,11 @@ pub struct Policy {
     /// automatically when users right-click a program.
     #[serde(skip_serializing_if = "String::is_empty")]
     pub program: String,
+    /// An isolated folder: every program started from this folder or its
+    /// subfolders uses this profile and may read and change everything in
+    /// the folder, and nothing else of the user's.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub folder: String,
     /// Name of a profile whose values this one starts from.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub extends: Option<String>,
@@ -41,6 +46,7 @@ impl Default for Policy {
             name: "unnamed".into(),
             description: String::new(),
             program: String::new(),
+            folder: String::new(),
             extends: None,
             tier: Tier::default(),
             filesystem: Filesystem::default(),
@@ -289,6 +295,9 @@ impl Policy {
                 Some((host, port)) if !host.is_empty() && port.parse::<u16>().is_ok() => {}
                 _ => errors.push(format!("network.allow entry '{entry}' must be host:port")),
             }
+        }
+        if !self.folder.is_empty() && self.folder.trim().is_empty() {
+            errors.push("folder must not be blank".into());
         }
         for p in self.filesystem.read_only.iter().chain(&self.filesystem.read_write) {
             if p.trim().is_empty() {

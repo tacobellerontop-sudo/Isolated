@@ -37,6 +37,8 @@ pub enum Start {
     /// The installed apps view with the install form filled in for this
     /// installer.
     Install(PathBuf),
+    /// The isolated folders view, set up to isolate (or showing) this folder.
+    Folders(Option<PathBuf>),
 }
 
 pub fn run(start: Start) -> Result<(), String> {
@@ -73,6 +75,7 @@ fn file_name(p: &Path) -> String {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum View {
     Apps,
+    Folders,
     Installed,
     Running,
     Settings,
@@ -145,6 +148,13 @@ struct NewContainer {
     error: Option<String>,
 }
 
+/// The "Isolate a folder" form.
+struct NewFolder {
+    path: String,
+    internet: bool,
+    error: Option<String>,
+}
+
 /// State of the "with options" dialog.
 struct OptionsDialog {
     target: PathBuf,
@@ -176,6 +186,15 @@ struct App {
     browser: Option<browser::Browser>,
     /// Whether each box's apps can reach the internet, refreshed with the list.
     box_net: std::collections::HashMap<String, bool>,
+    /// Isolated folders (user profiles with a folder).
+    folders: Vec<Policy>,
+    new_folder: Option<NewFolder>,
+    /// Programs found in each isolated folder, by folder path; filled when
+    /// the list is opened.
+    folder_programs: std::collections::HashMap<String, Vec<PathBuf>>,
+    /// Folder whose card was opened from the right-click menu.
+    focus_folder: Option<String>,
+    confirm_unisolate: Option<String>,
 }
 
 impl App {
@@ -204,6 +223,11 @@ impl App {
             new_container: None,
             browser: None,
             box_net: Default::default(),
+            folders: Vec::new(),
+            new_folder: None,
+            folder_programs: Default::default(),
+            focus_folder: None,
+            confirm_unisolate: None,
             dirs,
         };
         app.reload_boxes();
@@ -218,6 +242,22 @@ impl App {
                 }
             }
             Start::EditFor(target) => app.edit_for_program(&target),
+            Start::Folders(target) => {
+                app.view = View::Folders;
+                if let Some(t) = target {
+                    let s = t.to_string_lossy().into_owned();
+                    match app.store.find_for_folder(&s) {
+                        Some(p) => app.focus_folder = Some(p.folder),
+                        None => {
+                            app.new_folder = Some(NewFolder {
+                                path: s,
+                                internet: false,
+                                error: None,
+                            })
+                        }
+                    }
+                }
+            }
             Start::Options(target) => {
                 let (base, policy) = app.policy_for(&target);
                 app.options = Some(OptionsDialog {
@@ -236,6 +276,13 @@ impl App {
 
     fn reload_profiles(&mut self) {
         let (user, bad) = self.store.list_user();
+        let mut folders: Vec<Policy> = user
+            .iter()
+            .filter(|e| !e.policy.folder.is_empty())
+            .map(|e| e.policy.clone())
+            .collect();
+        folders.sort_by_key(|p| p.folder.to_lowercase());
+        self.folders = folders;
         self.user = user;
         self.bad = bad;
     }
@@ -623,6 +670,7 @@ impl eframe::App for App {
                 ui.add_space(16.0);
                 for (v, label) in [
                     (View::Apps, "Apps"),
+                    (View::Folders, "Folders"),
                     (View::Installed, "Containers"),
                     (View::Running, "Running"),
                     (View::Settings, "Settings"),
@@ -675,6 +723,7 @@ impl eframe::App for App {
                 }
                 match self.view {
                     View::Apps => self.apps_ui(ui),
+                    View::Folders => self.folders_ui(ui),
                     View::Installed => self.installed_ui(ui, &ctx),
                     View::Running => self.running_ui(ui),
                     View::Settings => self.settings_ui(ui, &ctx),
@@ -683,6 +732,9 @@ impl eframe::App for App {
         });
     }
 }
+
+/// How many programs the folder view lists per isolated folder.
+const FOLDER_PROGRAM_LIMIT: usize = 200;
 
 fn weak(ui: &egui::Ui, text: impl Into<String>) -> RichText {
     RichText::new(text.into()).color(ui.visuals().weak_text_color())
@@ -712,10 +764,13 @@ fn summary(p: &Policy) -> String {
         Clipboard::Full => "clipboard",
     };
     let folders = p.filesystem.read_only.len() + p.filesystem.read_write.len();
-    let mut s = format!(
-        "{net} · {clip} · {folders} folder{}",
-        if folders == 1 { "" } else { "s" }
-    );
+    let mut s = format!("{net} · {clip}");
+    if !p.folder.is_empty() {
+        s.push_str(" · isolated folder");
+    }
+    if folders > 0 || p.folder.is_empty() {
+        s.push_str(&format!(" · {folders} folder{}", if folders == 1 { "" } else { "s" }));
+    }
     if p.filesystem.ask_for_folders {
         s.push_str(" · asks for folders");
     }
@@ -800,12 +855,13 @@ impl App {
         ));
         ui.add_space(8.0);
 
-        if self.user.is_empty() {
+        if self.user.iter().all(|e| !e.policy.folder.is_empty()) {
             ui.label("No app profiles yet. Programs without a profile run with the default profile.");
         }
         let mut run = None;
         let mut edit = None;
-        for e in &self.user {
+        // Isolated folders have their own tab.
+        for e in self.user.iter().filter(|e| e.policy.folder.is_empty()) {
             egui::Frame::group(ui.style()).show(ui, |ui| {
                 ui.set_width(ui.available_width());
                 ui.horizontal(|ui| {
@@ -1383,15 +1439,27 @@ impl App {
                     ui.label("Name");
                     ui.text_edit_singleline(&mut ed.policy.name);
                     ui.end_row();
-                    ui.label("Program");
-                    ui.horizontal(|ui| {
-                        ui.add(egui::TextEdit::singleline(&mut ed.policy.program).desired_width(360.0));
-                        if ui.button("Browse...").clicked() {
-                            if let Some(p) = shell::pick_program() {
-                                ed.policy.program = p.to_string_lossy().into_owned();
+                    if ed.policy.folder.is_empty() {
+                        ui.label("Program");
+                        ui.horizontal(|ui| {
+                            ui.add(egui::TextEdit::singleline(&mut ed.policy.program).desired_width(360.0));
+                            if ui.button("Browse...").clicked() {
+                                if let Some(p) = shell::pick_program() {
+                                    ed.policy.program = p.to_string_lossy().into_owned();
+                                }
                             }
-                        }
-                    });
+                        });
+                    } else {
+                        ui.label("Isolated folder");
+                        ui.horizontal(|ui| {
+                            ui.add(egui::TextEdit::singleline(&mut ed.policy.folder).desired_width(360.0));
+                            if ui.button("Browse...").clicked() {
+                                if let Some(p) = shell::pick_folder() {
+                                    ed.policy.folder = p.to_string_lossy().into_owned();
+                                }
+                            }
+                        });
+                    }
                     ui.end_row();
                     ui.label("Description");
                     ui.text_edit_singleline(&mut ed.policy.description);
@@ -1412,7 +1480,7 @@ impl App {
                 if ui.button(RichText::new("Save").strong()).clicked() {
                     save = true;
                 }
-                if ui.button("Save and run").clicked() {
+                if ed.policy.folder.is_empty() && ui.button("Save and run").clicked() {
                     save = true;
                     save_and_run = true;
                 }
@@ -1426,7 +1494,15 @@ impl App {
             ed.policy.name = ed.policy.name.trim().to_string();
             let renamed = ed.original.as_deref() != Some(ed.policy.name.as_str());
             let taken = renamed && self.user.iter().any(|e| e.policy.name == ed.policy.name);
-            let result = if taken {
+            let folder_err = if ed.policy.folder.is_empty() {
+                None
+            } else {
+                ed.policy.folder = ed.policy.folder.trim().to_string();
+                isolated_windows::check_isolated_folder(&ed.policy.folder).err()
+            };
+            let result = if let Some(e) = folder_err {
+                Err(e)
+            } else if taken {
                 Err(format!(
                     "A profile named '{}' already exists. Choose another name.",
                     ed.policy.name
@@ -1453,6 +1529,254 @@ impl App {
             }
         } else if close {
             self.editor = None;
+        }
+    }
+
+    fn isolate_folder(&mut self) {
+        let Some(f) = self.new_folder.as_mut() else { return };
+        let path = f.path.trim().trim_matches('"').to_string();
+        let result = isolated_windows::check_isolated_folder(&path)
+            .and_then(|_| match self.store.find_for_folder(&path) {
+                Some(p) => Err(format!("This folder is already isolated (profile '{}').", p.name)),
+                None => Ok(()),
+            })
+            .and_then(|_| self.store.new_folder_profile(&path, f.internet))
+            .and_then(|p| self.store.save(&p).map(|_| p));
+        match result {
+            Ok(p) => {
+                self.new_folder = None;
+                self.focus_folder = Some(p.folder.clone());
+                self.reload_profiles();
+                self.set_status(
+                    format!(
+                        "Isolated {}. Programs started from it can change its files and nothing else.",
+                        p.folder
+                    ),
+                    false,
+                );
+            }
+            Err(e) => f.error = Some(e),
+        }
+    }
+
+    fn set_folder_internet(&mut self, name: &str, on: bool) {
+        let Some(mut p) = self.folders.iter().find(|p| p.name == name).cloned() else {
+            return;
+        };
+        p.network.mode = if on { NetworkMode::Full } else { NetworkMode::None };
+        match self.store.save(&p) {
+            Ok(_) => {
+                self.reload_profiles();
+                self.set_status(
+                    if on {
+                        "Programs in this folder can now reach the internet (from their next start)."
+                    } else {
+                        "Programs in this folder can no longer reach the internet (from their next start)."
+                    },
+                    false,
+                );
+            }
+            Err(e) => self.set_status(e, true),
+        }
+    }
+
+    fn run_in_folder(&mut self, profile: &str, program: &Path) {
+        let prog = program.to_string_lossy().into_owned();
+        match isolated_windows::spawn_self(&["run", "--profile", profile, "--", &prog]) {
+            Ok(()) => self.set_status(format!("Started {} in its isolated folder.", file_name(program)), false),
+            Err(e) => self.set_status(e, true),
+        }
+    }
+
+    fn folders_ui(&mut self, ui: &mut egui::Ui) {
+        ui.add_space(6.0);
+        ui.horizontal(|ui| {
+            ui.heading("Isolated folders");
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui.button("Isolate a folder...").clicked() {
+                    if let Some(p) = shell::pick_folder() {
+                        self.new_folder = Some(NewFolder {
+                            path: p.to_string_lossy().into_owned(),
+                            internet: false,
+                            error: None,
+                        });
+                    }
+                }
+            });
+        });
+        ui.label(weak(
+            ui,
+            "Programs started from an isolated folder can open and change every file in that folder and its subfolders, and nothing else of yours. \
+             Start them with right-click > Run in Isolated, or with Run below. Right-click a folder in Explorer and choose Isolate this folder to add one.",
+        ));
+        ui.add_space(8.0);
+
+        let mut isolate = false;
+        let mut cancel = false;
+        if let Some(f) = self.new_folder.as_mut() {
+            egui::Frame::group(ui.style()).show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                ui.label(RichText::new("Isolate a folder").strong());
+                ui.horizontal(|ui| {
+                    ui.label("Folder");
+                    ui.add(egui::TextEdit::singleline(&mut f.path).desired_width(420.0));
+                    if ui.button("Browse...").clicked() {
+                        if let Some(p) = shell::pick_folder() {
+                            f.path = p.to_string_lossy().into_owned();
+                        }
+                    }
+                });
+                ui.checkbox(&mut f.internet, "Let programs in this folder use the internet");
+                ui.label(
+                    weak(
+                        ui,
+                        "They can read, change, add and delete files anywhere in this folder. Copy and paste work. \
+                         Your other files, and everything outside the folder, stay hidden from them.",
+                    )
+                    .small(),
+                );
+                if let Some(e) = &f.error {
+                    ui.label(RichText::new(e).color(Color32::from_rgb(220, 80, 70)));
+                }
+                ui.horizontal(|ui| {
+                    if ui.button(RichText::new("Isolate this folder").strong()).clicked() {
+                        isolate = true;
+                    }
+                    if ui.button("Cancel").clicked() {
+                        cancel = true;
+                    }
+                });
+            });
+            ui.add_space(8.0);
+        }
+        if isolate {
+            self.isolate_folder();
+        } else if cancel {
+            self.new_folder = None;
+        }
+
+        if self.folders.is_empty() && self.new_folder.is_none() {
+            ui.label("No isolated folders yet.");
+        }
+
+        let mut net: Option<(String, bool)> = None;
+        let mut run: Option<(String, PathBuf)> = None;
+        let mut edit: Option<Policy> = None;
+        let mut remove: Option<String> = None;
+        let mut open: Option<String> = None;
+        let mut scan: Option<String> = None;
+        let focus = self.focus_folder.take();
+        for p in &self.folders {
+            egui::Frame::group(ui.style()).show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                ui.horizontal(|ui| {
+                    ui.vertical(|ui| {
+                        ui.label(RichText::new(file_name(Path::new(&p.folder))).strong());
+                        ui.label(weak(ui, &p.folder));
+                        ui.label(weak(ui, format!("profile {} · {}", p.name, summary(p))).small());
+                    });
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui.button("Stop isolating").clicked() {
+                            self.confirm_unisolate = Some(p.name.clone());
+                        }
+                        if ui
+                            .button("Edit")
+                            .on_hover_text("All settings for this folder")
+                            .clicked()
+                        {
+                            edit = Some(p.clone());
+                        }
+                        if ui
+                            .button("Open folder")
+                            .on_hover_text("Show the folder in Explorer")
+                            .clicked()
+                        {
+                            open = Some(p.folder.clone());
+                        }
+                        let mut on = p.network.mode == NetworkMode::Full;
+                        if ui.checkbox(&mut on, "Internet").changed() {
+                            net = Some((p.name.clone(), on));
+                        }
+                    });
+                });
+                if self.confirm_unisolate.as_deref() == Some(p.name.as_str()) {
+                    ui.horizontal(|ui| {
+                        ui.label("Stop isolating this folder? Its files are not touched.");
+                        if ui.button("Stop isolating").clicked() {
+                            remove = Some(p.name.clone());
+                        }
+                        if ui.button("Keep").clicked() {
+                            self.confirm_unisolate = None;
+                        }
+                    });
+                }
+                let key = p.folder.to_lowercase();
+                let opened = focus.as_deref().is_some_and(|f| f.eq_ignore_ascii_case(&p.folder));
+                let header = egui::CollapsingHeader::new("Programs in this folder")
+                    .id_salt(("folder-programs", &p.name))
+                    .default_open(opened);
+                let resp = header.show(ui, |ui| match self.folder_programs.get(&key) {
+                    None => {
+                        scan = Some(p.folder.clone());
+                        ui.spinner();
+                    }
+                    Some(list) if list.is_empty() => {
+                        ui.label(weak(ui, "No programs (.exe) found in this folder."));
+                    }
+                    Some(list) => {
+                        for exe in list {
+                            ui.horizontal(|ui| {
+                                let rel = exe
+                                    .strip_prefix(&p.folder)
+                                    .map(|r| r.to_string_lossy().into_owned())
+                                    .unwrap_or_else(|_| exe.to_string_lossy().into_owned());
+                                ui.label(rel).on_hover_text(exe.to_string_lossy());
+                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                    if ui.small_button("Run").clicked() {
+                                        run = Some((p.name.clone(), exe.clone()));
+                                    }
+                                });
+                            });
+                        }
+                        if list.len() >= FOLDER_PROGRAM_LIMIT {
+                            ui.label(weak(ui, "Showing the first programs only.").small());
+                        }
+                        if ui.small_button("Refresh").clicked() {
+                            scan = Some(p.folder.clone());
+                        }
+                    }
+                });
+                if opened {
+                    resp.header_response.scroll_to_me(Some(egui::Align::TOP));
+                }
+            });
+            ui.add_space(4.0);
+        }
+        if let Some(folder) = scan {
+            let list = isolated_windows::boxes::programs_in(Path::new(&folder), FOLDER_PROGRAM_LIMIT);
+            self.folder_programs.insert(folder.to_lowercase(), list);
+        }
+        if let Some((name, on)) = net {
+            self.set_folder_internet(&name, on);
+        }
+        if let Some((name, exe)) = run {
+            self.run_in_folder(&name, &exe);
+        }
+        if let Some(f) = open {
+            // Explorer itself opens the folder; nothing inside it is started.
+            shell::open(&f);
+        }
+        if let Some(p) = edit {
+            let name = p.name.clone();
+            self.editor = Some(Editor::new(p, Some(name)));
+        }
+        if let Some(name) = remove {
+            self.confirm_unisolate = None;
+            match self.store.delete(&name) {
+                Ok(()) => self.set_status("The folder is no longer isolated. Its files were not touched.", false),
+                Err(e) => self.set_status(e, true),
+            }
+            self.reload_profiles();
         }
     }
 

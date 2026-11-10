@@ -982,7 +982,7 @@ dependencies = [
 
 [[package]]
 name = "isolated"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "embed-resource",
  "isolated-core",
@@ -993,7 +993,7 @@ dependencies = [
 
 [[package]]
 name = "isolated-core"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "cab",
  "flate2",
@@ -1005,7 +1005,7 @@ dependencies = [
 
 [[package]]
 name = "isolated-gui"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "eframe",
  "isolated-core",
@@ -1014,7 +1014,7 @@ dependencies = [
 
 [[package]]
 name = "isolated-windows"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "isolated-core",
  "serde",

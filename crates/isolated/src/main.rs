@@ -41,6 +41,12 @@ Usage:
                                         Save a program inside a box as an app
   isolated box forget <box> <app>       Remove an app from a box's list (files are kept)
   isolated box delete <box>             Delete a box and everything installed in it
+  isolated folder <folder>              Isolate a folder, or manage it, in a window
+  isolated folder add <folder> [--net]  Isolate a folder: programs started from it may read and
+                                        change everything in it and nothing else (no internet
+                                        unless --net)
+  isolated folder remove <folder>       Stop isolating a folder (its files are kept)
+  isolated folder list                  List isolated folders
   isolated ps                           List running sandboxes
   isolated kill <id>                    Stop a sandbox and everything it started
   isolated profile list                 List profiles
@@ -153,6 +159,7 @@ fn dispatch(args: Vec<OsString>, out: &Out) -> Result<ExitCode, String> {
             Ok(gui(isolated_gui::Start::Options(target)))
         }
         "box" | "boxes" | "container" | "containers" => app_box(parser, &dirs, out),
+        "folder" | "folders" => folder(parser, &dirs, out),
         "ps" | "list" => ps(&dirs, out),
         "kill" | "stop" => {
             let id = single_value(&mut parser, "a sandbox id")?;
@@ -410,6 +417,94 @@ fn run(mut parser: lexopt::Parser, dirs: &Dirs, out: &Out) -> Result<ExitCode, S
     Ok(ExitCode::from(code.min(255) as u8))
 }
 
+/// A folder path as Explorer passes it. A quoted drive root such as
+/// `"D:\"` arrives as `D:"`, so stray quotes are dropped.
+fn folder_arg(v: OsString) -> Result<PathBuf, String> {
+    let s = os_string(v)?;
+    let s = s.trim().trim_matches('"');
+    let s = if s.len() == 2 && s.ends_with(':') {
+        format!("{s}\\")
+    } else {
+        s.to_string()
+    };
+    let p = PathBuf::from(&s);
+    let p = std::path::absolute(&p).unwrap_or(p);
+    Ok(p)
+}
+
+fn folder(mut parser: lexopt::Parser, dirs: &Dirs, out: &Out) -> Result<ExitCode, String> {
+    let store = ProfileStore::new(dirs.profiles());
+    let first = match parser.next().map_err(|e| e.to_string())? {
+        Some(Value(v)) => v,
+        Some(other) => return Err(format!("{}. Try 'isolated --help'.", other.unexpected())),
+        None => return Ok(gui(isolated_gui::Start::Folders(None))),
+    };
+    let sub = first.to_string_lossy().to_lowercase();
+    match sub.as_str() {
+        "list" | "ls" => {
+            let list = store.list_folders();
+            if list.is_empty() {
+                out.info("No isolated folders yet. Isolate one with: isolated folder add <folder>");
+            }
+            for p in list {
+                let net = if p.network.mode == NetworkMode::Full {
+                    "internet"
+                } else {
+                    "no internet"
+                };
+                out.info(&format!("{}  (profile {}, {net})", p.folder, p.name));
+            }
+            Ok(ExitCode::SUCCESS)
+        }
+        "add" => {
+            let mut path = None;
+            let mut net = false;
+            while let Some(arg) = parser.next().map_err(|e| e.to_string())? {
+                match arg {
+                    Long("net") => net = true,
+                    Long("no-net") => net = false,
+                    Value(v) if path.is_none() => path = Some(folder_arg(v)?),
+                    other => return Err(format!("{}. Try 'isolated --help'.", other.unexpected())),
+                }
+            }
+            let path = path.ok_or("expected a folder, for example: isolated folder add D:\\Games\\Old")?;
+            let s = path.to_string_lossy().into_owned();
+            isolated_windows::check_isolated_folder(&s)?;
+            if let Some(p) = store.find_for_folder(&s) {
+                out.info(&format!("{s} is already isolated (profile {}).", p.name));
+                return Ok(ExitCode::SUCCESS);
+            }
+            let p = store.new_folder_profile(&s, net)?;
+            store.save(&p)?;
+            out.info(&format!(
+                "Isolated {s} (profile {}). Right-click a program in it and choose Run in Isolated: it can change the files in this folder and nothing else.",
+                p.name
+            ));
+            Ok(ExitCode::SUCCESS)
+        }
+        "remove" | "rm" | "delete" => {
+            let path = match parser.next().map_err(|e| e.to_string())? {
+                Some(Value(v)) => folder_arg(v)?,
+                _ => return Err("expected a folder".into()),
+            };
+            let s = path.to_string_lossy().into_owned();
+            let p = store
+                .find_for_folder(&s)
+                .ok_or_else(|| format!("{s} is not an isolated folder."))?;
+            store.delete(&p.name)?;
+            out.info(&format!("{s} is no longer isolated. Its files were not touched."));
+            Ok(ExitCode::SUCCESS)
+        }
+        _ => {
+            let path = folder_arg(first)?;
+            if !path.is_dir() {
+                return Err(format!("{} is not a folder.", path.display()));
+            }
+            Ok(gui(isolated_gui::Start::Folders(Some(path))))
+        }
+    }
+}
+
 fn ps(dirs: &Dirs, out: &Out) -> Result<ExitCode, String> {
     let list: Vec<RunningEntry> = isolated_windows::running(dirs);
     if list.is_empty() {
@@ -444,7 +539,12 @@ fn profile(mut parser: lexopt::Parser, dirs: &Dirs, out: &Out) -> Result<ExitCod
             }
             let (user, bad) = store.list_user();
             for e in user {
-                out.info(&format!("{:<14} {}", e.policy.name, e.policy.program));
+                let what = if e.policy.folder.is_empty() {
+                    &e.policy.program
+                } else {
+                    &e.policy.folder
+                };
+                out.info(&format!("{:<14} {what}", e.policy.name));
             }
             for (p, err) in bad {
                 out.info(&format!("{}: {err}", p.display()));
