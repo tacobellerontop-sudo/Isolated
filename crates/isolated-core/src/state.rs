@@ -220,10 +220,6 @@ pub enum Access {
     /// for uninstall entries (`path`). Keys they create are deleted when
     /// the grant is revoked.
     RegistryCreate,
-    /// Only lets the sandbox see that this folder exists (its attributes),
-    /// not list or open what is in it. Set on the folder alone, never
-    /// passed down to what it contains.
-    Attributes,
 }
 
 /// A recorded ACL grant, written before the grant is applied and removed

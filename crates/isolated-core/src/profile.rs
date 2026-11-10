@@ -321,25 +321,6 @@ pub fn normalize_path_key(p: &str) -> String {
     s
 }
 
-/// Company and product from a Unity `app.info` file, if both are usable as
-/// single folder names.
-pub fn unity_app_info(text: &str) -> Option<(String, String)> {
-    let mut lines = text.lines().map(str::trim);
-    let ok = |s: &str| {
-        !s.is_empty()
-            && s.len() <= 120
-            && s != "."
-            && s != ".."
-            && !s.ends_with('.')
-            && !s
-                .chars()
-                .any(|c| matches!(c, '\\' | '/' | ':' | '*' | '?' | '"' | '<' | '>' | '|') || c.is_control())
-    };
-    let company = lines.next()?.to_string();
-    let product = lines.next()?.to_string();
-    (ok(&company) && ok(&product)).then_some((company, product))
-}
-
 /// True if `path` is `folder` or inside it (Windows rules, see
 /// [`normalize_path_key`]).
 pub fn path_is_under(path: &str, folder: &str) -> bool {
@@ -491,17 +472,6 @@ mod tests {
         // A child profile never inherits its parent's folder.
         let child = s.resolve_text("name='c'\nextends='games'").unwrap();
         assert!(child.folder.is_empty());
-    }
-
-    #[test]
-    fn unity_info() {
-        assert_eq!(
-            unity_app_info("Some Studio\r\nMy Game\r\n"),
-            Some(("Some Studio".into(), "My Game".into()))
-        );
-        assert_eq!(unity_app_info("Co\n..\n"), None);
-        assert_eq!(unity_app_info("Co\na\\b\n"), None);
-        assert_eq!(unity_app_info("OnlyOne"), None);
     }
 
     #[test]

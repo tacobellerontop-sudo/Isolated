@@ -12,17 +12,13 @@ use windows::Win32::Security::Authorization::{
     TRUSTEE_W,
 };
 use windows::Win32::Security::{
-    InitializeSecurityDescriptor, SetFileSecurityW, SetSecurityDescriptorDacl, ACE_FLAGS, ACL,
-    DACL_SECURITY_INFORMATION, NO_INHERITANCE, PSECURITY_DESCRIPTOR, PSID, SECURITY_DESCRIPTOR,
+    ACE_FLAGS, ACL, DACL_SECURITY_INFORMATION, NO_INHERITANCE, PSECURITY_DESCRIPTOR, PSID,
     SUB_CONTAINERS_AND_OBJECTS_INHERIT,
 };
-use windows::Win32::Storage::FileSystem::{
-    DELETE, FILE_GENERIC_EXECUTE, FILE_GENERIC_READ, FILE_GENERIC_WRITE, FILE_READ_ATTRIBUTES, SYNCHRONIZE,
-};
+use windows::Win32::Storage::FileSystem::{DELETE, FILE_GENERIC_EXECUTE, FILE_GENERIC_READ, FILE_GENERIC_WRITE};
 
 fn access_mask(a: Access) -> u32 {
     match a {
-        Access::Attributes => FILE_READ_ATTRIBUTES.0 | SYNCHRONIZE.0,
         Access::Read => FILE_GENERIC_READ.0 | FILE_GENERIC_EXECUTE.0,
         Access::Write | Access::RegistryCreate => {
             FILE_GENERIC_READ.0 | FILE_GENERIC_EXECUTE.0 | FILE_GENERIC_WRITE.0 | DELETE.0
@@ -30,19 +26,14 @@ fn access_mask(a: Access) -> u32 {
     }
 }
 
-/// Changes one entry of a file's or folder's permissions. With `propagate`,
-/// a folder's entry is inherited by everything in it (Windows walks the
-/// whole tree); without, only the folder itself changes, which is instant
-/// even for a large folder such as the user's LocalLow.
-fn modify_with(
+fn modify(
     path: &Path,
     sid: PSID,
     mode: windows::Win32::Security::Authorization::ACCESS_MODE,
     mask: u32,
-    propagate: bool,
 ) -> Result<(), String> {
     let wpath = Wide::new(path.as_os_str());
-    let inherit: ACE_FLAGS = if propagate && path.is_dir() {
+    let inherit: ACE_FLAGS = if path.is_dir() {
         SUB_CONTAINERS_AND_OBJECTS_INHERIT
     } else {
         NO_INHERITANCE
@@ -85,17 +76,6 @@ fn modify_with(
             return Err(win32_err("could not build new permissions", rc));
         }
         let _new = LocalBox(new_dacl as *mut _);
-        if !propagate {
-            let mut abs: SECURITY_DESCRIPTOR = std::mem::zeroed();
-            let psd = PSECURITY_DESCRIPTOR(&mut abs as *mut _ as *mut _);
-            InitializeSecurityDescriptor(psd, 1).map_err(|e| super::util::err("could not set permissions", e))?;
-            SetSecurityDescriptorDacl(psd, true, Some(new_dacl), false)
-                .map_err(|e| super::util::err("could not set permissions", e))?;
-            SetFileSecurityW(wpath.pcwstr(), DACL_SECURITY_INFORMATION, psd)
-                .ok()
-                .map_err(|e| super::util::err(&format!("could not change permissions of {}", path.display()), e))?;
-            return Ok(());
-        }
         let rc = SetNamedSecurityInfoW(
             wpath.pcwstr(),
             SE_FILE_OBJECT,
@@ -119,15 +99,14 @@ pub fn grant(path: &Path, sid: PSID, access: Access) -> Result<(), String> {
     if access == Access::RegistryCreate {
         return super::reg::grant_create(&path.to_string_lossy(), sid);
     }
-    let propagate = access != Access::Attributes;
-    modify_with(path, sid, GRANT_ACCESS, access_mask(access), propagate)
+    modify(path, sid, GRANT_ACCESS, access_mask(access))
 }
 
-pub fn revoke(path: &Path, sid: PSID, access: Access) -> Result<(), String> {
+pub fn revoke(path: &Path, sid: PSID) -> Result<(), String> {
     if !path.exists() {
         return Ok(());
     }
-    modify_with(path, sid, REVOKE_ACCESS, 0, access != Access::Attributes)
+    modify(path, sid, REVOKE_ACCESS, 0)
 }
 
 /// A SID parsed from its string form, freed on drop.
@@ -174,7 +153,7 @@ pub fn revoke_entry(dirs: &Dirs, entry: &JournalEntry) -> Result<(), String> {
         let r = if g.access == Access::RegistryCreate {
             super::reg::revoke_create(&g.path, sid.0)
         } else {
-            revoke(Path::new(&g.path), sid.0, g.access)
+            revoke(Path::new(&g.path), sid.0)
         };
         if let Err(e) = r {
             first_err.get_or_insert(e);
