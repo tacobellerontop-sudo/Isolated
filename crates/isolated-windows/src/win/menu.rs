@@ -21,6 +21,13 @@ pub const CLASSES: &[&str] = &[
 ];
 const VERB: &str = "Isolated";
 
+/// Folder entries: on a folder, and on the empty space inside an open one.
+/// `%1` is the folder clicked; `%V` the folder being viewed.
+const FOLDER_KEYS: &[(&str, &str)] = &[
+    (r"Software\Classes\Directory\shell\IsolatedFolder", "%1"),
+    (r"Software\Classes\Directory\Background\shell\IsolatedFolder", "%V"),
+];
+
 fn key_path(class: &str) -> String {
     format!(r"Software\Classes\{class}\shell\{VERB}")
 }
@@ -176,6 +183,14 @@ pub fn register(exe: &Path) -> Result<(), String> {
             set_string(&ck, None, command)?;
         }
     }
+    for (key, arg) in FOLDER_KEYS {
+        let _ = delete_tree(key);
+        let k = create_key(HKEY_CURRENT_USER, key)?;
+        set_string(&k, Some("MUIVerb"), "Isolate this folder...")?;
+        set_string(&k, Some("Icon"), &format!("{exe},0"))?;
+        let ck = create_key(HKEY_CURRENT_USER, &format!(r"{key}\command"))?;
+        set_string(&ck, None, &format!("{q} folder \"{arg}\""))?;
+    }
     notify();
     Ok(())
 }
@@ -184,6 +199,11 @@ pub fn unregister() -> Result<(), String> {
     let mut first = None;
     for class in CLASSES {
         if let Err(e) = delete_tree(&key_path(class)) {
+            first.get_or_insert(e);
+        }
+    }
+    for (key, _) in FOLDER_KEYS {
+        if let Err(e) = delete_tree(key) {
             first.get_or_insert(e);
         }
     }

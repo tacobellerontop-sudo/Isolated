@@ -209,6 +209,27 @@ if ($p.WaitForExit(60000)) {
     Check "folders profile with --no-ask runs without asking (timed out)" $false
 }
 
+# 14. An isolated folder: a program inside it can read and change the other
+#     files in the folder (and subfolders), and nothing outside it.
+$isoDir = Join-Path $env:USERPROFILE "isolated-smoke-folder"
+Remove-Item -Recurse -Force $isoDir -ErrorAction SilentlyContinue
+New-Item -ItemType Directory -Force -Path "$isoDir\bin", "$isoDir\data" | Out-Null
+Copy-Item $cmd "$isoDir\bin\cmd.exe"
+Set-Content -Path "$isoDir\data\in.txt" -Value "folder file"
+$code = Run-Sandboxed @("folder", "add", $isoDir)
+Check "folder add isolates a folder (exit $code)" ($code -eq 0)
+$code = Run-Sandboxed @("run", "--", "$isoDir\bin\cmd.exe", "/d", "/c", "type `"$isoDir\data\in.txt`" > `"$isoDir\out.txt`"")
+Check "program in an isolated folder can read and write the folder (exit $code)" (($code -eq 0) -and ((Get-Content "$isoDir\out.txt" -ErrorAction SilentlyContinue) -match "folder file"))
+$code = Run-Sandboxed @("run", "--", "$isoDir\bin\cmd.exe", "/d", "/c", "type `"$secret`"")
+Check "program in an isolated folder cannot read files outside it (exit $code)" ($code -ne 0)
+$acl = (icacls $isoDir) -join "`n"
+Check "isolated folder grants are removed afterwards" (-not ($acl -match "S-1-15-2-"))
+$code = Run-Sandboxed @("folder", "remove", $isoDir)
+Check "folder remove stops isolating (exit $code)" ($code -eq 0)
+$code = Run-Sandboxed @("run", "--", "$isoDir\bin\cmd.exe", "/d", "/c", "echo x> `"$isoDir\after.txt`"")
+Check "after folder remove the program can no longer change the folder (exit $code)" (-not (Test-Path "$isoDir\after.txt"))
+Remove-Item -Recurse -Force $isoDir -ErrorAction SilentlyContinue
+
 # 8. Right-click menu registers and unregisters.
 & $Exe register | Out-Null
 Start-Sleep -Milliseconds 500
@@ -218,9 +239,14 @@ $folders = (Get-ItemProperty "HKCU:\Software\Classes\exefile\shell\Isolated\shel
 Check "right-click menu has Run in Isolated with folders ($folders)" ("$folders" -match "--ask-folders")
 $msiMenu = Test-Path "HKCU:\Software\Classes\Msi.Package\shell\Isolated\shell\06install\command"
 Check "right-click menu has Install in Isolated for .msi files" $msiMenu
+$folderMenu = (Get-ItemProperty "HKCU:\Software\Classes\Directory\shell\IsolatedFolder\command" -ErrorAction SilentlyContinue).'(default)'
+Check "right-click menu has Isolate this folder on folders ($folderMenu)" ("$folderMenu" -match " folder ")
+$bgMenu = Test-Path "HKCU:\Software\Classes\Directory\Background\shell\IsolatedFolder\command"
+Check "right-click menu has Isolate this folder inside folders" $bgMenu
 & $Exe unregister | Out-Null
 Start-Sleep -Milliseconds 500
 Check "right-click menu is removed" (-not (Test-Path "HKCU:\Software\Classes\exefile\shell\Isolated"))
+Check "folder right-click menu is removed" (-not (Test-Path "HKCU:\Software\Classes\Directory\shell\IsolatedFolder"))
 
 Remove-Item -Recurse -Force $secretDir -ErrorAction SilentlyContinue
 if ($failures -gt 0) { Write-Host "$failures check(s) failed"; exit 1 }

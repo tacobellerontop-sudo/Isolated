@@ -262,6 +262,22 @@ pub mod boxes {
         out
     }
 
+    /// Programs (.exe) in a folder and its subfolders, sorted, at most
+    /// `limit` of them.
+    pub fn programs_in(folder: &Path, limit: usize) -> Vec<PathBuf> {
+        let mut out = Vec::new();
+        let mut seen = 0;
+        walk(folder, 0, &mut out, &mut seen);
+        let mut v: Vec<PathBuf> = out
+            .into_iter()
+            .map(|(p, _)| p)
+            .filter(|p| p.extension().is_some_and(|x| x.eq_ignore_ascii_case("exe")))
+            .collect();
+        v.sort_by_key(|p| p.to_string_lossy().to_lowercase());
+        v.truncate(limit);
+        v
+    }
+
     /// Programs and shortcuts in a box, to compare before and after an install.
     pub fn snapshot(folder: &Path) -> BTreeSet<String> {
         list(folder)
@@ -558,6 +574,21 @@ pub fn check_shared_folder(path: &str, write: bool) -> Result<()> {
     #[cfg(not(windows))]
     {
         let _ = write;
+        if std::path::Path::new(path).is_dir() {
+            Ok(())
+        } else {
+            Err(format!("The folder '{path}' does not exist."))
+        }
+    }
+}
+
+/// Checks that a folder can be isolated: it exists and is not far too broad
+/// or a system folder, since every program in it may change it.
+pub fn check_isolated_folder(path: &str) -> Result<()> {
+    #[cfg(windows)]
+    return win::launch::check_isolated_folder(path);
+    #[cfg(not(windows))]
+    {
         if std::path::Path::new(path).is_dir() {
             Ok(())
         } else {

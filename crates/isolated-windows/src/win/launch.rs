@@ -61,6 +61,11 @@ pub fn gaps(policy: &Policy) -> Vec<Gap> {
             g.push(Gap::notice(
                 "In the compatible tier the app can read your files. It can only change files in its private folders.",
             ));
+            if !policy.folder.trim().is_empty() {
+                g.push(Gap::weaker(
+                    "The compatible tier cannot keep an app to its isolated folder: it could read your other files and could not change the folder.",
+                ));
+            }
             if !policy.filesystem.read_write.is_empty() {
                 g.push(Gap::notice(
                     "Read-write folders are not available in the compatible tier yet.",
@@ -292,6 +297,31 @@ fn env_var(k: &str) -> Option<String> {
     std::env::var(k).ok()
 }
 
+/// The profile's isolated folder, checked: it must exist and be specific
+/// enough to hand over for reading and writing.
+fn isolated_folder(policy: &Policy) -> Result<Option<PathBuf>> {
+    if policy.folder.trim().is_empty() {
+        return Ok(None);
+    }
+    let expanded = expand_path(&policy.folder, &home_dir(), env_var);
+    let p = canonical(&expanded).map_err(|_| format!("The isolated folder '{}' does not exist.", policy.folder))?;
+    if !p.is_dir() {
+        return Err(format!("The isolated folder '{}' is not a folder.", policy.folder));
+    }
+    check_grant(&p, Access::Write)?;
+    Ok(Some(p))
+}
+
+/// Checks that a folder can be isolated (all its programs get to read and
+/// change it).
+pub fn check_isolated_folder(raw: &str) -> Result<()> {
+    let p = Policy {
+        folder: raw.to_string(),
+        ..Default::default()
+    };
+    isolated_folder(&p).map(|_| ())
+}
+
 /// Builds the grant list for an AppContainer sandbox.
 fn grants_for(policy: &Policy, program: &Path) -> Result<Vec<Grant>> {
     let home = home_dir();
@@ -309,9 +339,16 @@ fn grants_for(policy: &Policy, program: &Path) -> Result<Vec<Grant>> {
             out.push(Grant { path: s, access });
         }
     };
+    let folder = isolated_folder(policy)?;
+    if let Some(f) = &folder {
+        push(f.clone(), Access::Write, &mut out);
+    }
     if policy.filesystem.program_folder {
         if let Some(p) = program_grant(program) {
-            push(p, Access::Read, &mut out);
+            // Programs inside the isolated folder can already read themselves.
+            if !folder.as_ref().is_some_and(|f| under(&p, f)) {
+                push(p, Access::Read, &mut out);
+            }
         }
     }
     for (list, access) in [
@@ -560,9 +597,16 @@ pub fn launch(dirs: &Dirs, policy: &Policy, req: &LaunchRequest) -> Result<Runni
     let program_key = normalize_path_key(&prepared.program.to_string_lossy());
     let id = new_sandbox_id();
     let job_name = format!("Local\\Isolated-{id}");
+    // All programs of an isolated folder share one identity, so they keep
+    // the same settings and can start each other.
+    let identity_key = if policy.folder.trim().is_empty() {
+        program_key
+    } else {
+        format!("folder:{}", normalize_path_key(&policy.folder))
+    };
     let container_name = match &req.app_box {
         Some(b) => appcontainer::box_container_name(b),
-        None => appcontainer::container_name(&req.profile_name, &program_key),
+        None => appcontainer::container_name(&req.profile_name, &identity_key),
     };
     // A box always keeps its own user folders: that is where apps install.
     let private_home = policy.filesystem.private_home || req.app_box.is_some();

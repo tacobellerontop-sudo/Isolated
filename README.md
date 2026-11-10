@@ -46,6 +46,22 @@ entry is under **Show more options**. The submenu has:
 | Edit Isolated profile... | Save permissions for this app |
 | Install in Isolated... | Install this app into a box (programs and `.msi` files) |
 
+**Right-click a folder** (or the empty space inside one) and choose
+**Isolate this folder...** to make it an *isolated folder*: every program
+started from it, or from its subfolders, can open, change, add and delete
+the files in that folder and nothing else of yours. Good for a portable app
+or game that keeps its saves next to it, or a set of tools that work on the
+same files. Programs in the folder share one sandbox identity, so they keep
+the same settings and can start each other. No internet unless you allow it;
+copy and paste work.
+
+Start the programs with **Run in Isolated** (it picks the folder's profile
+automatically) or with **Run** in the window's **Folders** tab, which also
+has the **Internet** switch and **Stop isolating**. Opening a program by
+double-clicking it still runs it normally, outside the sandbox. A whole
+drive, your whole user folder, and Windows or Program Files cannot be
+isolated, because every program in them would get to change them.
+
 **The Isolated window** (Start menu) lists app profiles, shows running
 sandboxes with a Stop button, and holds settings. Drop a program on it to
 create a profile.
@@ -123,6 +139,9 @@ isolated run --no-net -- .\suspicious.exe
 isolated run --ro "$HOME\Documents\input" --rw "$HOME\Documents\output" -- converter.exe
 isolated run --profile game-mod -- .\launcher.exe
 isolated run --ask-folders -- .\editor.exe
+isolated folder add D:\Games\OldGame
+isolated folder list
+isolated folder remove D:\Games\OldGame
 isolated box install --box 7-Zip -- .\7z2408-x64.msi
 isolated box install --box Editor -- .\EditorSetup.exe
 isolated box list

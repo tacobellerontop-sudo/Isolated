@@ -108,7 +108,7 @@ impl ProfileStore {
             let mut base: toml::Table = toml::from_str(&ptext).map_err(|e| format!("{parent}: {e}"))?;
             table.remove("extends");
             // The parent's own name/description/program never leak into the child.
-            for k in ["name", "description", "program"] {
+            for k in ["name", "description", "program", "folder"] {
                 base.remove(k);
             }
             merge(&mut base, table);
@@ -168,17 +168,74 @@ impl ProfileStore {
             .collect()
     }
 
-    /// The saved user profile for a program, matched by full path.
+    /// The saved user profile for a program: one made for that exact
+    /// program, otherwise the isolated folder it sits in (the innermost one
+    /// if folders are nested).
     pub fn find_for_program(&self, program: &str) -> Option<Policy> {
         let want = normalize_path_key(program);
+        if want.is_empty() {
+            return None;
+        }
+        let list = self.list_user().0;
+        if let Some(e) = list
+            .iter()
+            .find(|e| !e.policy.program.is_empty() && normalize_path_key(&e.policy.program) == want)
+        {
+            return Some(e.policy.clone());
+        }
+        list.into_iter()
+            .filter(|e| !e.policy.folder.is_empty() && path_is_under(&want, &e.policy.folder))
+            .max_by_key(|e| normalize_path_key(&e.policy.folder).len())
+            .map(|e| e.policy)
+    }
+
+    /// The saved profile that isolates exactly this folder.
+    pub fn find_for_folder(&self, folder: &str) -> Option<Policy> {
+        let want = normalize_path_key(folder);
         if want.is_empty() {
             return None;
         }
         self.list_user()
             .0
             .into_iter()
-            .find(|e| !e.policy.program.is_empty() && normalize_path_key(&e.policy.program) == want)
+            .find(|e| !e.policy.folder.is_empty() && normalize_path_key(&e.policy.folder) == want)
             .map(|e| e.policy)
+    }
+
+    /// A new profile that isolates `folder`: programs in it may read and
+    /// change the folder and nothing else of the user's; copy and paste
+    /// work; internet only if `internet`. Not saved yet.
+    pub fn new_folder_profile(&self, folder: &str, internet: bool) -> Result<Policy, String> {
+        let mut p = self.load(DEFAULT_PROFILE)?;
+        p.extends = Some(DEFAULT_PROFILE.to_string());
+        p.folder = folder.trim().to_string();
+        let stem = Path::new(&p.folder.replace('\\', "/"))
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("folder")
+            .to_string();
+        p.name = self.suggest_name(&format!("{}-folder", stem.replace('.', "-")));
+        p.description = "Isolated folder".into();
+        p.devices.clipboard = crate::policy::Clipboard::Full;
+        p.network.mode = if internet {
+            crate::policy::NetworkMode::Full
+        } else {
+            crate::policy::NetworkMode::None
+        };
+        Ok(p)
+    }
+
+    /// Every isolated folder, sorted by folder path.
+    pub fn list_folders(&self) -> Vec<Policy> {
+        let mut v: Vec<Policy> = self
+            .list_user()
+            .0
+            .into_iter()
+            .map(|e| e.policy)
+            .filter(|p| !p.folder.is_empty())
+            .collect();
+        v.sort_by_key(|p| normalize_path_key(&p.folder));
+        v
     }
 
     /// Saves a user profile, returning its path. Refuses to overwrite a
@@ -262,6 +319,17 @@ pub fn normalize_path_key(p: &str) -> String {
         s.pop();
     }
     s
+}
+
+/// True if `path` is `folder` or inside it (Windows rules, see
+/// [`normalize_path_key`]).
+pub fn path_is_under(path: &str, folder: &str) -> bool {
+    let p = normalize_path_key(path);
+    let f = normalize_path_key(folder);
+    if f.is_empty() {
+        return false;
+    }
+    p == f || p.starts_with(&format!("{}\\", f.trim_end_matches('\\')))
 }
 
 /// Expands a leading `~` to the user's home folder and `%VAR%` references.
@@ -368,6 +436,50 @@ mod tests {
         assert!(s.find_for_program(r"C:\Tools\Conv\conv.exe").is_none());
         p.name = "strict".into();
         assert!(s.save(&p).is_err());
+    }
+
+    #[test]
+    fn isolated_folders() {
+        let s = tmp_store("f");
+        let mut p = s.load("strict").unwrap();
+        p.name = "games".into();
+        p.folder = r"C:\Games\Old".into();
+        s.save(&p).unwrap();
+        let mut inner = p.clone();
+        inner.name = "games-mods".into();
+        inner.folder = r"C:\Games\Old\Mods".into();
+        s.save(&inner).unwrap();
+        let mut exact = p.clone();
+        exact.name = "tool".into();
+        exact.folder.clear();
+        exact.program = r"C:\Games\Old\tool.exe".into();
+        s.save(&exact).unwrap();
+        assert_eq!(s.find_for_program(r"c:/games/old/bin/game.exe").unwrap().name, "games");
+        assert_eq!(
+            s.find_for_program(r"C:\Games\Old\Mods\x\m.exe").unwrap().name,
+            "games-mods"
+        );
+        assert_eq!(s.find_for_program(r"C:\Games\Old\tool.exe").unwrap().name, "tool");
+        assert!(s.find_for_program(r"C:\Games\Older\a.exe").is_none());
+        assert_eq!(s.find_for_folder(r"c:\games\old\").unwrap().name, "games");
+        assert_eq!(s.list_folders().len(), 2);
+        let n = s.new_folder_profile(r"D:\Work\My Stuff", true).unwrap();
+        assert_eq!(n.name, "my-stuff-folder");
+        assert_eq!(n.network.mode, NetworkMode::Full);
+        assert_eq!(n.devices.clipboard, Clipboard::Full);
+        s.save(&n).unwrap();
+        assert_eq!(s.find_for_program(r"D:\Work\My Stuff\a\b.exe").unwrap().name, n.name);
+        // A child profile never inherits its parent's folder.
+        let child = s.resolve_text("name='c'\nextends='games'").unwrap();
+        assert!(child.folder.is_empty());
+    }
+
+    #[test]
+    fn under_folder() {
+        assert!(path_is_under(r"C:\A\b.exe", r"c:\a"));
+        assert!(path_is_under(r"C:\A", r"c:\a\"));
+        assert!(!path_is_under(r"C:\AB\b.exe", r"c:\a"));
+        assert!(path_is_under(r"D:\x.exe", r"D:\"));
     }
 
     #[test]
