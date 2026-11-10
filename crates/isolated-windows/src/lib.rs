@@ -540,6 +540,26 @@ pub mod shell {
         }
     }
 
+    /// The user's known folders as this process sees them (for diagnosing
+    /// what a sandboxed app gets), as (name, path).
+    pub fn known_folders() -> Vec<(&'static str, Option<PathBuf>)> {
+        #[cfg(windows)]
+        {
+            use crate::win::shell::{known_folder, KnownFolder as K};
+            vec![
+                ("Profile", known_folder(K::Profile)),
+                ("Documents", known_folder(K::Documents)),
+                ("Desktop", known_folder(K::Desktop)),
+                ("Downloads", known_folder(K::Downloads)),
+                ("LocalAppDataLow", known_folder(K::LocalAppDataLow)),
+                ("RoamingAppData", known_folder(K::RoamingAppData)),
+                ("LocalAppData", known_folder(K::LocalAppData)),
+            ]
+        }
+        #[cfg(not(windows))]
+        Vec::new()
+    }
+
     /// Asks users to pick any file.
     pub fn pick_file() -> Option<PathBuf> {
         #[cfg(windows)]

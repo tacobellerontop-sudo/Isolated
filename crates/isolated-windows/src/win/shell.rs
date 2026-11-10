@@ -10,9 +10,10 @@ use windows::Win32::System::Com::{
 };
 use windows::Win32::UI::Shell::Common::COMDLG_FILTERSPEC;
 use windows::Win32::UI::Shell::{
-    FOLDERID_Desktop, FOLDERID_Documents, FOLDERID_Downloads, FOLDERID_LocalAppDataLow, FOLDERID_Profile,
-    FOLDERID_Programs, FileOpenDialog, IFileOpenDialog, IShellLinkW, SHGetKnownFolderPath, ShellExecuteW, ShellLink,
-    FOS_FORCEFILESYSTEM, FOS_PICKFOLDERS, KF_FLAG_DEFAULT, SIGDN_FILESYSPATH, SLR_NO_UI,
+    FOLDERID_Desktop, FOLDERID_Documents, FOLDERID_Downloads, FOLDERID_LocalAppData, FOLDERID_LocalAppDataLow,
+    FOLDERID_Profile, FOLDERID_Programs, FOLDERID_RoamingAppData, FileOpenDialog, IFileOpenDialog, IShellLinkW,
+    SHGetKnownFolderPath, ShellExecuteW, ShellLink, FOS_FORCEFILESYSTEM, FOS_PICKFOLDERS, KF_FLAG_DEFAULT,
+    SIGDN_FILESYSPATH, SLR_NO_UI,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     MessageBoxW, IDYES, MB_ICONERROR, MB_ICONINFORMATION, MB_ICONWARNING, MB_OK, MB_SETFOREGROUND, MB_YESNO,
@@ -121,6 +122,8 @@ pub enum KnownFolder {
     Desktop,
     Documents,
     LocalAppDataLow,
+    RoamingAppData,
+    LocalAppData,
     StartMenuPrograms,
 }
 
@@ -131,6 +134,8 @@ pub fn known_folder(f: KnownFolder) -> Option<PathBuf> {
         KnownFolder::Desktop => &FOLDERID_Desktop,
         KnownFolder::Documents => &FOLDERID_Documents,
         KnownFolder::LocalAppDataLow => &FOLDERID_LocalAppDataLow,
+        KnownFolder::RoamingAppData => &FOLDERID_RoamingAppData,
+        KnownFolder::LocalAppData => &FOLDERID_LocalAppData,
         KnownFolder::StartMenuPrograms => &FOLDERID_Programs,
     };
     unsafe {
