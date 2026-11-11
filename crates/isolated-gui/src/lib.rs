@@ -184,6 +184,8 @@ struct App {
     confirm_delete_box: Option<String>,
     new_container: Option<NewContainer>,
     browser: Option<browser::Browser>,
+    /// The private files of an isolated folder, shown in the Folders tab.
+    folder_browser: Option<browser::Browser>,
     /// Whether each box's apps can reach the internet, refreshed with the list.
     box_net: std::collections::HashMap<String, bool>,
     /// Isolated folders (user profiles with a folder).
@@ -222,6 +224,7 @@ impl App {
             confirm_delete_box: None,
             new_container: None,
             browser: None,
+            folder_browser: None,
             box_net: Default::default(),
             folders: Vec::new(),
             new_folder: None,
@@ -645,11 +648,12 @@ impl eframe::App for App {
 
         // Programs dropped on the window get a profile.
         let dropped: Vec<PathBuf> = ctx.input(|i| i.raw.dropped_files.iter().map(|f| f.path().to_path_buf()).collect());
-        match self
-            .browser
-            .as_ref()
-            .filter(|_| self.view == View::Installed && self.editor.is_none())
-        {
+        let file_view = match self.view {
+            View::Installed => self.browser.as_ref(),
+            View::Folders => self.folder_browser.as_ref(),
+            _ => None,
+        };
+        match file_view.filter(|_| self.editor.is_none()) {
             // Files dropped on a container's file view are copied into it.
             Some(b) => {
                 for p in dropped {
@@ -683,6 +687,9 @@ impl eframe::App for App {
                     if ui.selectable_label(self.view == v, text).clicked() {
                         if v == View::Installed && self.view == View::Installed {
                             self.browser = None;
+                        }
+                        if v == View::Folders && self.view == View::Folders {
+                            self.folder_browser = None;
                         }
                         self.view = v;
                         self.editor = None;
@@ -1588,7 +1595,33 @@ impl App {
         }
     }
 
+    fn open_folder_files(&mut self, p: &Policy) {
+        match isolated_windows::boxes::isolated_folder_base(p, &p.name) {
+            Ok(base) => {
+                self.new_folder = None;
+                self.folder_browser = Some(browser::Browser::for_folder(&file_name(Path::new(&p.folder)), base));
+            }
+            Err(e) => self.set_status(e, true),
+        }
+    }
+
     fn folders_ui(&mut self, ui: &mut egui::Ui) {
+        if let Some(mut br) = self.folder_browser.take() {
+            let mut keep = true;
+            for a in br.ui(ui) {
+                match a {
+                    browser::Action::Close => keep = false,
+                    browser::Action::Status(m, e) => self.set_status(m, e),
+                    // Not offered for isolated folders: their programs run
+                    // from the folder itself.
+                    browser::Action::Run(_) | browser::Action::SaveApp(_) => {}
+                }
+            }
+            if keep && self.folder_browser.is_none() {
+                self.folder_browser = Some(br);
+            }
+            return;
+        }
         ui.add_space(6.0);
         ui.horizontal(|ui| {
             ui.heading("Isolated folders");
@@ -1664,6 +1697,7 @@ impl App {
         let mut edit: Option<Policy> = None;
         let mut remove: Option<String> = None;
         let mut open: Option<String> = None;
+        let mut files: Option<Policy> = None;
         let mut scan: Option<String> = None;
         let focus = self.focus_folder.take();
         for p in &self.folders {
@@ -1685,6 +1719,15 @@ impl App {
                             .clicked()
                         {
                             edit = Some(p.clone());
+                        }
+                        if ui
+                            .button("Private files")
+                            .on_hover_text(
+                                "Settings and saves its programs keep in the sandbox (their AppData and LocalLow). Add your existing saves here.",
+                            )
+                            .clicked()
+                        {
+                            files = Some(p.clone());
                         }
                         if ui
                             .button("Open folder")
@@ -1765,6 +1808,9 @@ impl App {
         if let Some(f) = open {
             // Explorer itself opens the folder; nothing inside it is started.
             shell::open(&f);
+        }
+        if let Some(p) = files {
+            self.open_folder_files(&p);
         }
         if let Some(p) = edit {
             let name = p.name.clone();

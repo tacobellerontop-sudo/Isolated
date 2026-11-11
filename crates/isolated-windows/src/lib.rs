@@ -262,6 +262,18 @@ pub mod boxes {
         out
     }
 
+    /// The sandbox's own files for an isolated folder (see
+    /// `win::launch::isolated_folder_base`), created if needed.
+    pub fn isolated_folder_base(policy: &Policy, profile_name: &str) -> Result<PathBuf> {
+        #[cfg(windows)]
+        return crate::win::launch::isolated_folder_base(policy, profile_name);
+        #[cfg(not(windows))]
+        {
+            let _ = (policy, profile_name);
+            unsupported()
+        }
+    }
+
     /// Programs (.exe) in a folder and its subfolders, sorted, at most
     /// `limit` of them.
     pub fn programs_in(folder: &Path, limit: usize) -> Vec<PathBuf> {

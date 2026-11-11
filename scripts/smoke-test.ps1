@@ -236,6 +236,21 @@ foreach ($kf in @("LocalAppDataLow", "LocalAppData")) {
     $line = Get-Content "$isoDir\diag.txt" -ErrorAction SilentlyContinue | Where-Object { $_ -match "^$kf = " }
     Check "$kf is the sandbox's own writable folder ($line)" (("$line" -match "writable: true") -and ("$line" -match "\\Packages\\isolated\."))
 }
+# Users add their existing saves through the folder's private files: what
+# "folder files" calls App data must be the LocalLow the program sees.
+# isolated.exe is a GUI-subsystem program: PowerShell neither waits for it
+# nor captures its output with "&", so redirect to a file.
+Start-Process -FilePath $Exe -ArgumentList @("folder", "files", "`"$isoDir`"") -Wait -NoNewWindow -RedirectStandardOutput "$isoDir\files.txt" -RedirectStandardError "$isoDir\files-err.txt" | Out-Null
+$filesOut = @(Get-Content "$isoDir\files.txt", "$isoDir\files-err.txt" -ErrorAction SilentlyContinue)
+Write-Host "folder files:"; $filesOut | ForEach-Object { Write-Host "    $_" }
+$appData = (($filesOut | Where-Object { "$_" -match "^App data .*: " }) -replace "^App data .*?: ", "")
+Check "folder files shows App data as the program's LocalLow ($appData)" (("$appData" -ne "") -and ("$appData" -ieq "$lowPath"))
+if ("$appData" -ne "") {
+    New-Item -ItemType Directory -Force -Path "$appData\SmokeCo\SmokeGame" | Out-Null
+    Set-Content -Path "$appData\SmokeCo\SmokeGame\save.txt" -Value "old save"
+    $code = Run-Sandboxed @("run", "--", "$isoDir\bin\cmd.exe", "/d", "/c", "type `"$lowPath\SmokeCo\SmokeGame\save.txt`" > `"$isoDir\save-out.txt`"")
+    Check "program in an isolated folder reads a save added to its App data (exit $code)" ((Get-Content "$isoDir\save-out.txt" -ErrorAction SilentlyContinue) -match "old save")
+}
 $acl = (icacls $isoDir) -join "`n"
 Check "isolated folder grants are removed afterwards" (-not ($acl -match "S-1-15-2-"))
 $code = Run-Sandboxed @("folder", "remove", $isoDir)

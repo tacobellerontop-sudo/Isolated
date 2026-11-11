@@ -55,6 +55,15 @@ same files. Programs in the folder share one sandbox identity, so they keep
 the same settings and can start each other. No internet unless you allow it;
 copy and paste work.
 
+Settings and saves that programs write to your user folder (AppData,
+LocalLow) go to the sandbox's own copy instead. **Private files** in the
+**Folders** tab shows them: drop your existing saves into **App data** (what
+the programs see as AppData\Local and AppData\LocalLow) or **Roaming**, and
+copy anything out to your PC. For example, a Unity game that saves to
+`%USERPROFILE%\AppData\LocalLow\<company>\<game>` reads
+`App data\<company>\<game>` in the sandbox. `isolated folder files <folder>`
+prints these paths.
+
 Start the programs with **Run in Isolated** (it picks the folder's profile
 automatically) or with **Run** in the window's **Folders** tab, which also
 has the **Internet** switch and **Stop isolating**. Opening a program by
@@ -141,6 +150,7 @@ isolated run --profile game-mod -- .\launcher.exe
 isolated run --ask-folders -- .\editor.exe
 isolated folder add D:\Games\OldGame
 isolated folder list
+isolated folder files D:\Games\OldGame
 isolated folder remove D:\Games\OldGame
 isolated box install --box 7-Zip -- .\7z2408-x64.msi
 isolated box install --box Editor -- .\EditorSetup.exe

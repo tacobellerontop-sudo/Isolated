@@ -47,6 +47,7 @@ Usage:
                                         unless --net)
   isolated folder remove <folder>       Stop isolating a folder (its files are kept)
   isolated folder list                  List isolated folders
+  isolated folder files <folder>        Show where its programs keep settings and saves
   isolated ps                           List running sandboxes
   isolated kill <id>                    Stop a sandbox and everything it started
   isolated profile list                 List profiles
@@ -504,6 +505,34 @@ fn folder(mut parser: lexopt::Parser, dirs: &Dirs, out: &Out) -> Result<ExitCode
             out.info(&format!(
                 "Isolated {s} (profile {}). Right-click a program in it and choose Run in Isolated: it can change the files in this folder and nothing else.",
                 p.name
+            ));
+            Ok(ExitCode::SUCCESS)
+        }
+        "files" | "data" => {
+            let path = match parser.next().map_err(|e| e.to_string())? {
+                Some(Value(v)) => folder_arg(v)?,
+                _ => return Err("expected a folder, for example: isolated folder files D:\\Games\\Old".into()),
+            };
+            let s = path.to_string_lossy().into_owned();
+            let p = store
+                .find_for_folder(&s)
+                .ok_or_else(|| format!("{s} is not an isolated folder."))?;
+            let base = isolated_windows::boxes::isolated_folder_base(&p, &p.name)?;
+            // Programs see this as LocalAppData and LocalLow (see make_private_dirs).
+            let app_data = match (base.file_name(), base.parent().and_then(|b| b.file_name())) {
+                (Some(ac), Some(container)) if ac.eq_ignore_ascii_case("AC") => {
+                    base.join(r"Home\AppData\Local\Packages").join(container).join("AC")
+                }
+                _ => base.join("Home"),
+            };
+            out.info(&format!("Private files: {}", base.display()));
+            out.info(&format!(
+                "App data (their AppData\\Local and AppData\\LocalLow): {}",
+                app_data.display()
+            ));
+            out.info(&format!(
+                "Roaming (their AppData\\Roaming): {}",
+                base.join(r"Home\AppData\Roaming").display()
             ));
             Ok(ExitCode::SUCCESS)
         }
