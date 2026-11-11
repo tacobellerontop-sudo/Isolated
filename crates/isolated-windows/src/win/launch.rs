@@ -843,6 +843,22 @@ pub fn box_folder(policy: &Policy, box_name: &str) -> Result<PathBuf> {
     Ok(base)
 }
 
+/// The sandbox's own base folder for an isolated folder's programs, created
+/// if needed. Its `Home` subfolder is the user folder they see, and their
+/// settings and saves (AppData, LocalLow) live under it.
+pub fn isolated_folder_base(policy: &Policy, profile_name: &str) -> Result<PathBuf> {
+    if policy.folder.trim().is_empty() {
+        return Err(format!("'{profile_name}' is not an isolated folder."));
+    }
+    let name = appcontainer::folder_container_name(&normalize_path_key(&policy.folder));
+    let base = match policy.tier {
+        Tier::Isolated => appcontainer::create_or_open(&name, &format!("Isolated: {profile_name}"))?.folder()?,
+        Tier::Compatible => compatible_base(&name)?,
+    };
+    make_private_dirs(&base, true)?;
+    Ok(base)
+}
+
 /// The folder an installer is asked to use inside a box: the
 /// `%LOCALAPPDATA%\Programs\<name>` that programs inside the box see.
 pub fn box_install_dir(policy: &Policy, base: &Path, app: &str) -> PathBuf {

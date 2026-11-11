@@ -31,8 +31,18 @@ pub enum Action {
     Status(String, bool),
 }
 
+/// Whose files the view shows.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Kind {
+    Container,
+    /// The private files of an isolated folder's programs: their settings
+    /// and saves. Their programs live in the real folder.
+    Folder,
+}
+
 pub struct Browser {
     pub box_name: String,
+    pub kind: Kind,
     /// The container's base folder; the view never leaves it.
     root: PathBuf,
     dir: PathBuf,
@@ -50,6 +60,7 @@ impl Browser {
         let start = root.join("Home");
         let mut b = Browser {
             box_name: box_name.to_string(),
+            kind: Kind::Container,
             dir: if start.is_dir() { start } else { root.clone() },
             root,
             entries: Vec::new(),
@@ -60,6 +71,31 @@ impl Browser {
         };
         b.reload();
         b
+    }
+
+    /// Opens the view on an isolated folder's private files, starting
+    /// where its programs keep their settings and saves.
+    pub fn for_folder(name: &str, root: PathBuf) -> Browser {
+        let mut b = Browser::new(name, root);
+        b.kind = Kind::Folder;
+        if let Some(d) = b.app_data().filter(|d| d.is_dir()) {
+            b.go(d);
+        }
+        b
+    }
+
+    /// Where Windows puts LocalAppData and LocalLow for apps in the sandbox:
+    /// `Home\AppData\Local\Packages\<container>\AC`. Unity games, for
+    /// example, keep their saves here under `<company>\<game>`.
+    fn app_data(&self) -> Option<PathBuf> {
+        let is_ac = self.root.file_name().is_some_and(|n| n.eq_ignore_ascii_case("AC"));
+        let container = self.root.parent().and_then(Path::file_name).filter(|_| is_ac)?;
+        Some(
+            self.root
+                .join(r"Home\AppData\Local\Packages")
+                .join(container)
+                .join("AC"),
+        )
     }
 
     #[cfg(test)]
@@ -156,17 +192,20 @@ impl Browser {
 
         ui.add_space(6.0);
         ui.horizontal(|ui| {
-            if ui.button("< Containers").clicked() {
+            let (back, heading) = match self.kind {
+                Kind::Container => ("< Containers", format!("Files in {}", self.box_name)),
+                Kind::Folder => ("< Folders", format!("Private files of {}", self.box_name)),
+            };
+            if ui.button(back).clicked() {
                 actions.push(Action::Close);
             }
-            ui.heading(format!("Files in {}", self.box_name));
+            ui.heading(heading);
         });
-        ui.label(
-            RichText::new(
-                "These files exist only inside this container. Copy what you made to your PC to use it outside, or drop files here to add them. Start programs with Run here: opening them from Explorer would run them outside the container.",
-            )
-            .color(ui.visuals().weak_text_color()),
-        );
+        let about = match self.kind {
+            Kind::Container => "These files exist only inside this container. Copy what you made to your PC to use it outside, or drop files here to add them. Start programs with Run here: opening them from Explorer would run them outside the container.",
+            Kind::Folder => "Programs in this isolated folder keep their settings and saves here instead of in your user folder. App data is what they see as AppData\\Local and AppData\\LocalLow, so a game that saves to LocalLow\\<company>\\<game> on your PC saves to App data\\<company>\\<game> here. Drop files or folders here to add them, or copy them out to your PC.",
+        };
+        ui.label(RichText::new(about).color(ui.visuals().weak_text_color()));
         ui.add_space(6.0);
 
         // Where we are, as clickable folders from the container's root.
@@ -190,14 +229,23 @@ impl Browser {
             if ui.add_enabled(self.dir != self.root, egui::Button::new("Up")).clicked() {
                 go_to = up;
             }
+            let mut places: Vec<(&str, PathBuf)> = Vec::new();
+            if let Some(d) = self.app_data() {
+                places.push(("App data", d));
+            }
             for (label, sub) in [
+                ("Roaming", r"Home\AppData\Roaming"),
                 ("Home", "Home"),
                 ("Downloads", r"Home\Downloads"),
                 ("Documents", r"Home\Documents"),
                 ("Desktop", r"Home\Desktop"),
-                ("Programs", "Programs"),
             ] {
-                let p = self.root.join(sub);
+                places.push((label, self.root.join(sub)));
+            }
+            if self.kind == Kind::Container {
+                places.push(("Programs", self.root.join("Programs")));
+            }
+            for (label, p) in places {
                 if p.is_dir() && ui.button(label).clicked() {
                     go_to = Some(p);
                 }
@@ -277,7 +325,7 @@ impl Browser {
                         {
                             copy_out = Some(e.path.clone());
                         }
-                        if !e.is_dir && runnable(&e.name) {
+                        if self.kind == Kind::Container && !e.is_dir && runnable(&e.name) {
                             if ui
                                 .small_button("Run here")
                                 .on_hover_text("Start it inside this container")
