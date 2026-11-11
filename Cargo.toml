@@ -3,7 +3,7 @@ resolver = "2"
 members = ["crates/isolated-core", "crates/isolated-windows", "crates/isolated-gui", "crates/isolated"]
 
 [workspace.package]
-version = "0.5.1"
+version = "0.5.2"
 edition = "2021"
 repository = "https://github.com/tacobellerontop-sudo/Isolated"
 rust-version = "1.85"
