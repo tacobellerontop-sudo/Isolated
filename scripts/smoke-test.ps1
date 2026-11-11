@@ -228,6 +228,10 @@ Copy-Item $Exe "$isoDir\bin\probe.exe"
 $code = Run-Sandboxed @("run", "--", "$isoDir\bin\probe.exe", "diag-folders", "$isoDir\diag.txt")
 Write-Host "Known folders inside an isolated folder (exit $code):"
 Get-Content "$isoDir\diag.txt" -ErrorAction SilentlyContinue | ForEach-Object { Write-Host "    $_" }
+# Games save deep below LocalLow; the sandbox's part of the path must stay
+# short or their saves pass Windows' 260-character limit.
+$lowPath = ((Get-Content "$isoDir\diag.txt" -ErrorAction SilentlyContinue | Where-Object { $_ -match "^LocalAppDataLow = " }) -replace "^LocalAppDataLow = ", "" -replace " \(writable.*$", "")
+Check "LocalLow path inside an isolated folder is short ($($lowPath.Length) chars)" (($lowPath.Length -gt 0) -and ($lowPath.Length -le 125))
 foreach ($kf in @("LocalAppDataLow", "LocalAppData")) {
     $line = Get-Content "$isoDir\diag.txt" -ErrorAction SilentlyContinue | Where-Object { $_ -match "^$kf = " }
     Check "$kf is the sandbox's own writable folder ($line)" (("$line" -match "writable: true") -and ("$line" -match "\\Packages\\isolated\."))

@@ -607,14 +607,12 @@ pub fn launch(dirs: &Dirs, policy: &Policy, req: &LaunchRequest) -> Result<Runni
     let job_name = format!("Local\\Isolated-{id}");
     // All programs of an isolated folder share one identity, so they keep
     // the same settings and can start each other.
-    let identity_key = if policy.folder.trim().is_empty() {
-        program_key
-    } else {
-        format!("folder:{}", normalize_path_key(&policy.folder))
-    };
     let container_name = match &req.app_box {
         Some(b) => appcontainer::box_container_name(b),
-        None => appcontainer::container_name(&req.profile_name, &identity_key),
+        None if !policy.folder.trim().is_empty() => {
+            appcontainer::folder_container_name(&normalize_path_key(&policy.folder))
+        }
+        None => appcontainer::container_name(&req.profile_name, &program_key),
     };
     // A box always keeps its own user folders: that is where apps install.
     let private_home = policy.filesystem.private_home || req.app_box.is_some();

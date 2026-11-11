@@ -128,6 +128,19 @@ pub fn container_name(profile: &str, program_key: &str) -> String {
     )
 }
 
+/// Identity of an isolated folder, shared by every program in it. Kept short
+/// on purpose: inside a sandbox Windows puts the LocalAppData and LocalLow
+/// folders at `<user folder>\AppData\Local\Packages\<name>\AC`, and the user
+/// folder is itself in `...\Packages\<name>\AC\Home`, so the name appears
+/// twice in every path an app saves there. Long names pushed real game save
+/// paths past Windows' 260-character limit.
+pub fn folder_container_name(folder_key: &str) -> String {
+    format!(
+        "Isolated.f.{:08x}",
+        isolated_core::state::stable_hash(folder_key) as u32
+    )
+}
+
 /// Identity of an app box: fixed per box, so its folders persist across
 /// runs whatever program is started in it.
 pub fn box_container_name(box_name: &str) -> String {
