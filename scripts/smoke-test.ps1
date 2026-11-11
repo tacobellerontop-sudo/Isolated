@@ -238,7 +238,10 @@ foreach ($kf in @("LocalAppDataLow", "LocalAppData")) {
 }
 # Users add their existing saves through the folder's private files: what
 # "folder files" calls App data must be the LocalLow the program sees.
-$filesOut = & $Exe folder files $isoDir 2>&1
+# isolated.exe is a GUI-subsystem program: PowerShell neither waits for it
+# nor captures its output with "&", so redirect to a file.
+Start-Process -FilePath $Exe -ArgumentList @("folder", "files", "`"$isoDir`"") -Wait -NoNewWindow -RedirectStandardOutput "$isoDir\files.txt" -RedirectStandardError "$isoDir\files-err.txt" | Out-Null
+$filesOut = @(Get-Content "$isoDir\files.txt", "$isoDir\files-err.txt" -ErrorAction SilentlyContinue)
 Write-Host "folder files:"; $filesOut | ForEach-Object { Write-Host "    $_" }
 $appData = (($filesOut | Where-Object { "$_" -match "^App data .*: " }) -replace "^App data .*?: ", "")
 Check "folder files shows App data as the program's LocalLow ($appData)" (("$appData" -ne "") -and ("$appData" -ieq "$lowPath"))
