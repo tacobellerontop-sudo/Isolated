@@ -489,6 +489,47 @@ open('spawn.txt', 'w').write('\n'.join(res))
 } else {
     Write-Host "SKIP  could not download Electron"
 }
+# What stops Node and Electron, and whether letting sandboxes read the
+# attributes of C:\ and the folders above the user folder fixes it.
+Set-Content -Path "$aiHome\diag.py" -Value @'
+import subprocess, os, sys
+node, electron, label = sys.argv[1], sys.argv[2], sys.argv[3]
+out = []
+def run(name, args, env=None):
+    e = dict(os.environ); e.update(env or {})
+    try:
+        r = subprocess.run(args, capture_output=True, timeout=90, env=e)
+        text = (r.stdout + r.stderr).decode('utf-8', 'replace').strip().splitlines()
+        keep = [l for l in text if any(k in l for k in ('Error', 'ERROR', 'FATAL', 'EPERM', 'denied', 'title', 'Check failed'))][:12]
+        out.append(f'{label} {name}: exit {r.returncode:#x}')
+        out.extend('      ' + l[:220] for l in keep)
+    except Exception as ex:
+        out.append(f'{label} {name}: {ex!r}')
+run('node probe.js', [node, 'probe.js'])
+run('node preserve-symlinks', [node, '--preserve-symlinks', '--preserve-symlinks-main', 'probe.js'])
+if electron:
+    for extra in ([], ['--no-sandbox'], ['--no-sandbox', '--disable-gpu']):
+        run('electron ' + ' '.join(extra), [electron] + extra + ['eapp'], {'ELECTRON_ENABLE_LOGGING': '1'})
+        try:
+            out.append('      result: ' + open(os.path.join(os.environ['USERPROFILE'], 'electron.txt')).read())
+            os.remove(os.path.join(os.environ['USERPROFILE'], 'electron.txt'))
+        except Exception:
+            pass
+open('diag-' + label + '.txt', 'w').write('\n'.join(out))
+'@
+$electronExe = ""
+$boxText = (Get-Content (Join-Path $boxesDir "SmokeAI.toml") -Raw -ErrorAction SilentlyContinue)
+$m2 = [regex]::Match("$boxText", 'path = ["'']([^"'']*\\electron\.exe)["'']')
+if ($m2.Success) { $electronExe = $m2.Groups[1].Value -replace '\\\\', '\' }
+if ($node -and $python) {
+    Run-Timed @("box", "run", "SmokeAI", $python, "diag.py", $node, $electronExe, "before") 600 | Out-Null
+    Get-Content "$aiHome\diag-before.txt" -ErrorAction SilentlyContinue | ForEach-Object { Write-Host "    $_" }
+    $chain = @("C:\", "C:\Users", $env:USERPROFILE, "$env:USERPROFILE\AppData", "$env:LOCALAPPDATA", "$env:LOCALAPPDATA\Packages")
+    foreach ($d in $chain) { icacls $d /grant "*S-1-15-2-1:(RA)" | Out-Null }
+    Run-Timed @("box", "run", "SmokeAI", $python, "diag.py", $node, $electronExe, "after-RA") 600 | Out-Null
+    Get-Content "$aiHome\diag-after-RA.txt" -ErrorAction SilentlyContinue | ForEach-Object { Write-Host "    $_" }
+    foreach ($d in $chain) { icacls $d /remove "*S-1-15-2-1" | Out-Null }
+}
 Run-Sandboxed @("box", "delete", "SmokeAI") | Out-Null
 
 # 8. Right-click menu registers and unregisters.
