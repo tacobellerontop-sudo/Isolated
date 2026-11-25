@@ -30,6 +30,11 @@ pub struct AppBox {
     /// real path becomes a link to the box's own copy.
     #[serde(default, rename = "keep", skip_serializing_if = "Vec::is_empty")]
     pub kept_folders: Vec<String>,
+    /// Set once the folders known apps insist on (see
+    /// [`crate::apps::known_kept_folders`]) were added, so a folder users
+    /// remove isn't added again.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub known_folders_added: bool,
     /// Programs users can start from the box.
     #[serde(rename = "app")]
     pub apps: Vec<BoxApp>,
@@ -43,6 +48,7 @@ impl Default for AppBox {
             created: now_unix(),
             internet: None,
             kept_folders: Vec::new(),
+            known_folders_added: false,
             apps: Vec::new(),
         }
     }
@@ -108,6 +114,30 @@ pub struct BoxApp {
 }
 
 impl AppBox {
+    /// Adds the folders that apps in the box are known to insist on (like
+    /// Kryoto's `%USERPROFILE%\Kryoto Games`). Returns true if the box
+    /// changed and should be saved.
+    pub fn add_known_kept(&mut self, extra: &str) -> bool {
+        if self.known_folders_added {
+            return false;
+        }
+        let mut found: Vec<&str> = crate::apps::known_kept_folders(&self.name).to_vec();
+        found.extend(crate::apps::known_kept_folders(extra));
+        for a in &self.apps {
+            found.extend(crate::apps::known_kept_folders(&a.path));
+        }
+        if found.is_empty() {
+            return false;
+        }
+        for f in found {
+            if !self.kept_folders.iter().any(|k| k.eq_ignore_ascii_case(f)) {
+                self.kept_folders.push(f.to_string());
+            }
+        }
+        self.known_folders_added = true;
+        true
+    }
+
     pub fn new(name: &str, profile: &str) -> AppBox {
         AppBox {
             name: name.to_string(),

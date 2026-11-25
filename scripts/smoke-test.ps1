@@ -629,6 +629,10 @@ foreach ($prof in @("compatible", "online")) {
     $kb = "SmokeKeep-$prof"
     $real = Join-Path $env:USERPROFILE "Iso Keep $prof"
     Run-Sandboxed @("box", "create", $kb, "--profile", $prof) | Out-Null
+    # What an earlier run left on the PC (a half-finished download and an
+    # empty folder) moves into the container.
+    New-Item -ItemType Directory -Force -Path "$real\_downloads\empty" | Out-Null
+    Set-Content -Path "$real\_downloads\old.part" -Value "old"
     # Called directly so the path with spaces stays one argument.
     & $Exe box keep $kb $real 2>&1 | ForEach-Object { Write-Host "    keep: $_" }
     # cmd joins its arguments back into one line, so the redirect target is
@@ -639,8 +643,21 @@ foreach ($prof in @("compatible", "online")) {
     Write-Host "Kept folder ($prof): exit $code, copy $($copy.FullName), left on PC: $(Test-Path $real)"
     Check "a kept folder's writes land in the container ($prof)" ($null -ne $copy)
     Check "nothing is left on the PC after the app closes ($prof)" (-not (Test-Path $real))
+    $old = $null
+    if ($copy) { $old = Get-Item -LiteralPath (Join-Path $copy.DirectoryName "_downloads\old.part") -ErrorAction SilentlyContinue }
+    Check "files already in a kept folder move into the container ($prof)" ($null -ne $old)
     Run-Sandboxed @("box", "delete", $kb) | Out-Null
 }
+
+# 22b. Kryoto's game folder is kept without users having to add it.
+$kg = Join-Path $env:USERPROFILE "Kryoto Games"
+Run-Sandboxed @("box", "create", "SmokeKryoto", "--profile", "compatible") | Out-Null
+$code = Run-Timed @("box", "run", "--accept-weaker", "SmokeKryoto", "$env:SystemRoot\System32\cmd.exe", "/d", "/c", "echo", "game>", "$kg\game.txt") 60
+$kept = & $Exe box keep SmokeKryoto 2>&1 | Out-String
+$copy = Get-ChildItem -Path (Join-Path $env:USERPROFILE "AppData\LocalLow\Isolated") -Recurse -Filter "game.txt" -ErrorAction SilentlyContinue | Where-Object { $_.FullName -match "\\Kept\\.*Kryoto Games" } | Select-Object -First 1
+Write-Host "Kryoto box: exit $code, keeps: $($kept.Trim()), copy $($copy.FullName), left on PC: $(Test-Path $kg)"
+Check "a Kryoto container keeps Kryoto Games by itself" ($null -ne $copy -and -not (Test-Path $kg))
+Run-Sandboxed @("box", "delete", "SmokeKryoto") | Out-Null
 
 # 21. No program started by the tests above was flagged as leaving its
 #     sandbox (the warning is meant for approved administrator prompts).

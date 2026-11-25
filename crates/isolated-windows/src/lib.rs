@@ -145,8 +145,8 @@ pub mod boxes {
     }
 
     /// Links each of the box's kept folders to the box's own copy, so apps
-    /// that insist on a folder outside the box write into the box. A folder
-    /// that already holds files on the PC is left alone. Returns a note for
+    /// that insist on a folder outside the box write into the box. What the
+    /// folder already holds on the PC is moved into the box first. Returns a note for
     /// each folder that couldn't be kept.
     pub fn keep_folders(policy: &Policy, b: &isolated_core::boxes::AppBox) -> Vec<String> {
         let mut notes = Vec::new();
@@ -168,12 +168,10 @@ pub mod boxes {
                 continue;
             }
             if real.exists() {
-                let empty = std::fs::read_dir(&real)
-                    .map(|mut d| d.next().is_none())
-                    .unwrap_or(false);
-                if !(empty && real.is_dir() && std::fs::remove_dir(&real).is_ok()) {
+                if let Err(e) = move_into(&real, &copy) {
                     notes.push(format!(
-                        "{} already exists on your PC with files in it, so it was left alone. Move or delete it to keep it in the container.",
+                        "{} is on your PC with files in it that couldn't be moved into the container ({e}), so it was left alone. \
+                         Close programs using it, or move or delete it, then start the app again.",
                         real.display()
                     ));
                     continue;
@@ -189,6 +187,50 @@ pub mod boxes {
             }
         }
         notes
+    }
+
+    /// Moves what an app already left in `real` (before the folder was
+    /// kept, or while running outside the box) into the box's copy, then
+    /// removes `real`. Nothing is overwritten: a name the copy already has
+    /// is an error, and everything stays where it was.
+    fn move_into(real: &Path, copy: &Path) -> std::result::Result<(), String> {
+        if !real.is_dir() {
+            return Err("it is a file, not a folder".into());
+        }
+        let entries: Vec<_> = std::fs::read_dir(real)
+            .map_err(|e| e.to_string())?
+            .filter_map(|e| e.ok())
+            .collect();
+        if let Some(clash) = entries.iter().find(|e| {
+            let to = copy.join(e.file_name());
+            to.exists() && !(is_empty_tree(&e.path()) || is_empty_tree(&to))
+        }) {
+            return Err(format!(
+                "the container already has {}",
+                clash.file_name().to_string_lossy()
+            ));
+        }
+        for e in entries {
+            let from = e.path();
+            let to = copy.join(e.file_name());
+            if is_empty_tree(&from) {
+                std::fs::remove_dir_all(&from).map_err(|err| format!("{}: {err}", from.display()))?;
+            } else {
+                if is_empty_tree(&to) {
+                    let _ = std::fs::remove_dir_all(&to);
+                }
+                std::fs::rename(&from, &to).map_err(|err| format!("{}: {err}", from.display()))?;
+            }
+        }
+        std::fs::remove_dir(real).map_err(|e| e.to_string())
+    }
+
+    /// True for a folder holding nothing but (possibly nested) empty folders.
+    fn is_empty_tree(p: &Path) -> bool {
+        if std::fs::symlink_metadata(p).is_ok_and(|m| m.file_type().is_symlink()) {
+            return false;
+        }
+        p.is_dir() && std::fs::read_dir(p).is_ok_and(|d| d.filter_map(|e| e.ok()).all(|e| is_empty_tree(&e.path())))
     }
 
     /// Removes the links [`keep_folders`] made; the box keeps its copies.

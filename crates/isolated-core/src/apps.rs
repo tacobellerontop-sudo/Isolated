@@ -102,8 +102,31 @@ pub fn installer_looks_web(file_name: &str) -> bool {
     false
 }
 
+/// Folders outside the box that an app is known to insist on writing to,
+/// found by a name in `text` (a box name or program path). These are kept
+/// inside the box automatically.
+pub fn known_kept_folders(text: &str) -> &'static [&'static str] {
+    let t = text.to_ascii_lowercase();
+    if t.contains("kryoto") {
+        // Kryoto Desktop downloads and installs games here, whatever
+        // folder it was installed to.
+        &["%USERPROFILE%\\Kryoto Games"]
+    } else {
+        &[]
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn known_folders() {
+        assert_eq!(
+            super::known_kept_folders("C:\\x\\Kryoto Desktop\\kryoto.exe"),
+            &["%USERPROFILE%\\Kryoto Games"]
+        );
+        assert!(super::known_kept_folders("notepad.exe").is_empty());
+    }
+
     #[test]
     fn web_installer_names() {
         use super::installer_looks_web as w;

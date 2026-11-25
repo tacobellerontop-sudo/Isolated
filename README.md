@@ -182,7 +182,9 @@ gives them their own `HOME` and AppData.
   under **Folders from your PC kept in this container** on the container's
   card, or run `isolated box keep "AI apps" "C:\Users\you\Kryoto Games"`.
   While the container's apps run, the path is a link into the container's
-  own copy, removed again when they close.
+  own copy, removed again when they close. Anything already in that folder
+  on your PC is moved into the container first. Kryoto's folder is kept
+  automatically.
 - Programs in a container that ask for administrator rights start without
   them. If you approve an administrator prompt that an app in a container
   still shows, Windows starts that program outside the container, and
