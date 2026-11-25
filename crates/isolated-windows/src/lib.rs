@@ -1014,3 +1014,70 @@ pub fn spawn_self(args: &[&str]) -> Result<()> {
         .map(|_| ())
         .map_err(|e| format!("could not start Isolated: {e}"))
 }
+
+/// The hidden sandbox user that "Works with more apps" containers run as,
+/// so their apps can't read the signed-in user's folder and settings.
+pub mod sandbox_user {
+    use crate::Result;
+    use isolated_core::{Dirs, Policy};
+
+    /// The Windows account's name.
+    pub const ACCOUNT: &str = "IsolatedSandbox";
+
+    /// True when the sandbox user is set up for this user.
+    pub fn ready(dirs: &Dirs) -> bool {
+        #[cfg(windows)]
+        return crate::win::sandbox_user::ready(dirs);
+        #[cfg(not(windows))]
+        {
+            let _ = dirs;
+            false
+        }
+    }
+
+    /// True if a box with this policy runs as the sandbox user. Its kept
+    /// folders are then that account's, set up by the copy of Isolated
+    /// running as it.
+    pub fn applies(dirs: &Dirs, policy: &Policy) -> bool {
+        #[cfg(windows)]
+        return crate::win::launch::uses_sandbox_user(dirs, policy);
+        #[cfg(not(windows))]
+        {
+            let _ = (dirs, policy);
+            false
+        }
+    }
+
+    /// Creates the account. Needs administrator rights.
+    pub fn setup(dirs: &Dirs) -> Result<()> {
+        #[cfg(windows)]
+        return crate::win::sandbox_user::setup(dirs);
+        #[cfg(not(windows))]
+        {
+            let _ = dirs;
+            Err("only on Windows".into())
+        }
+    }
+
+    /// Deletes the account. Needs administrator rights.
+    pub fn remove(dirs: &Dirs) -> Result<()> {
+        #[cfg(windows)]
+        return crate::win::sandbox_user::remove(dirs);
+        #[cfg(not(windows))]
+        {
+            let _ = dirs;
+            Err("only on Windows".into())
+        }
+    }
+
+    /// Entry point of the copy of Isolated started as the sandbox user.
+    pub fn run_inner(file: &std::path::Path) -> Result<u32> {
+        #[cfg(windows)]
+        return crate::win::launch::run_as_sandbox_user(file);
+        #[cfg(not(windows))]
+        {
+            let _ = file;
+            Err("only on Windows".into())
+        }
+    }
+}

@@ -202,6 +202,8 @@ struct App {
     compat: Option<(bool, Instant)>,
     /// Folder typed in each container's "Keep a folder" field, by box name.
     keep_input: std::collections::HashMap<String, String>,
+    /// Whether the hidden sandbox user is set up, and when that was checked.
+    sandbox_user: Option<(bool, std::time::Instant)>,
 }
 
 impl App {
@@ -238,6 +240,7 @@ impl App {
             confirm_unisolate: None,
             compat: None,
             keep_input: Default::default(),
+            sandbox_user: None,
             dirs,
         };
         app.reload_boxes();
@@ -2065,6 +2068,46 @@ impl App {
             .changed();
         if changed {
             let _ = self.settings.save(&self.dirs);
+        }
+        ui.label(weak(ui, "Applies to apps started after a change."));
+
+        ui.add_space(12.0);
+        ui.label(RichText::new("Hide your files from \"Works with more apps\" containers").strong());
+        let ready = match self.sandbox_user {
+            Some((r, at)) if at.elapsed() < std::time::Duration::from_secs(3) => r,
+            _ => {
+                let r = isolated_windows::sandbox_user::ready(&self.dirs);
+                self.sandbox_user = Some((r, std::time::Instant::now()));
+                r
+            }
+        };
+        if ready {
+            ui.label(format!(
+                "On. Their apps run as a hidden Windows user ({}), so they can't read your user folder \
+                 (Documents, Desktop, Downloads, AppData) or your settings. They can still see programs installed \
+                 for everyone, such as those in Program Files.",
+                isolated_windows::sandbox_user::ACCOUNT
+            ));
+            if ui.button("Turn off").clicked() {
+                match isolated_windows::spawn_self(&["sandbox-user", "remove"]) {
+                    Ok(()) => self.set_status("Approve the administrator prompt to remove the hidden user.", false),
+                    Err(e) => self.set_status(e, true),
+                }
+                self.sandbox_user = None;
+            }
+        } else {
+            ui.label(
+                "Off. Apps in these containers can't change your files, but they can read most of them. \
+                 Turning this on creates a hidden Windows user that these apps run as, which Windows keeps out \
+                 of your user folder and settings. Locked-down containers don't need it.",
+            );
+            if ui.button("Turn on (asks for administrator rights once)").clicked() {
+                match isolated_windows::spawn_self(&["sandbox-user", "setup"]) {
+                    Ok(()) => self.set_status("Approve the administrator prompt to create the hidden user.", false),
+                    Err(e) => self.set_status(e, true),
+                }
+                self.sandbox_user = None;
+            }
         }
         ui.label(weak(ui, "Applies to apps started after a change."));
 

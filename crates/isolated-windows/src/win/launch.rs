@@ -597,7 +597,9 @@ impl Drop for AttrList {
 pub struct Running {
     id: String,
     app_pid: u32,
-    job: Job,
+    /// `None` when the app runs as the sandbox user: the copy of Isolated
+    /// started as that user owns the job and watches it.
+    job: Option<Job>,
     process: OwnedHandle,
     dirs: Dirs,
     journal: Option<JournalEntry>,
@@ -615,13 +617,20 @@ impl Running {
     }
 
     pub fn wait(self) -> Result<u32> {
-        let escapes = super::escape::Watch::start(
-            self.job.handle.raw(),
-            self.label.clone(),
-            self.dirs.data.join("escapes.log"),
-        );
-        self.job.wait_empty();
-        escapes.stop();
+        match &self.job {
+            Some(job) => {
+                let escapes = super::escape::Watch::start(
+                    job.handle.raw(),
+                    self.label.clone(),
+                    self.dirs.data.join("escapes.log"),
+                );
+                job.wait_empty();
+                escapes.stop();
+            }
+            None => unsafe {
+                let _ = WaitForSingleObject(self.process.raw(), INFINITE);
+            },
+        }
         if let Some(m) = self.marker {
             m.stop();
         }
@@ -642,7 +651,145 @@ impl Running {
     }
 }
 
+/// Set in the copy of Isolated that runs as the sandbox user: where the
+/// boxes are (the signed-in user's LocalLow), since its own LocalLow differs.
+static COMPAT_ROOT: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+/// Also set there: the sandbox id the signed-in user's Isolated recorded,
+/// and that user's SID, who may stop the job.
+static INNER_ID: std::sync::OnceLock<(String, String)> = std::sync::OnceLock::new();
+
+/// True if launches for this policy go through the sandbox user.
+pub fn uses_sandbox_user(dirs: &Dirs, policy: &Policy) -> bool {
+    policy.tier == Tier::Compatible && COMPAT_ROOT.get().is_none() && super::sandbox_user::ready(dirs)
+}
+
+/// What the copy of Isolated started as the sandbox user is asked to run.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct InnerRequest {
+    policy: Policy,
+    profile_name: String,
+    target: PathBuf,
+    args: Vec<String>,
+    accept_weaker: bool,
+    app_box: String,
+    installer: bool,
+    raw_tail: String,
+    workdir: Option<PathBuf>,
+    /// Where boxes live: the signed-in user's `LocalLow\Isolated`.
+    root: PathBuf,
+    kept_folders: Vec<String>,
+    settings: isolated_core::Settings,
+    id: String,
+    owner_sid: String,
+}
+
+/// Starts a box's app as the hidden sandbox user: a copy of Isolated runs as
+/// that account and starts the app in the usual low-integrity sandbox.
+fn launch_as_sandbox_user(dirs: &Dirs, policy: &Policy, req: &LaunchRequest, box_name: &str) -> Result<Running> {
+    let base = box_folder(policy, box_name)?;
+    let id = new_sandbox_id();
+    let sid = super::sandbox_user::sid()?;
+    super::sandbox_user::grant(&base, &sid)?;
+    // The sandbox user can't read the signed-in user's folders, so an
+    // installer from Downloads is copied into the box first.
+    let mut target = req.target.clone();
+    if req.installer {
+        let stage = base.join("Setup");
+        let _ = std::fs::create_dir_all(&stage);
+        if let Some(name) = target.file_name() {
+            let copy = stage.join(name);
+            std::fs::copy(&target, &copy).map_err(|e| format!("could not copy {}: {e}", target.display()))?;
+            target = copy;
+        }
+    }
+    let inner = InnerRequest {
+        policy: policy.clone(),
+        profile_name: req.profile_name.clone(),
+        target: target.clone(),
+        args: req.args.clone(),
+        accept_weaker: req.accept_weaker,
+        app_box: box_name.to_string(),
+        installer: req.installer,
+        raw_tail: req.raw_tail.clone(),
+        workdir: req.workdir.clone(),
+        root: base.parent().map(Path::to_path_buf).unwrap_or_default(),
+        kept_folders: isolated_core::boxes::AppBox::load(dirs, box_name)
+            .map(|b| b.kept_folders)
+            .unwrap_or_default(),
+        settings: isolated_core::Settings::load(dirs),
+        id: id.clone(),
+        owner_sid: super::sandbox_user::current_user_sid()?,
+    };
+    let file = base.join(format!("launch-{id}.json"));
+    std::fs::write(&file, serde_json::to_vec(&inner).map_err(|e| e.to_string())?)
+        .map_err(|e| format!("could not write {}: {e}", file.display()))?;
+    let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+    let command_line = format!("\"{}\" __sandbox-user-run \"{}\"", exe.display(), file.display());
+    let (process, pid) = super::sandbox_user::spawn(dirs, &exe, &command_line, &base)?;
+    let entry = RunningEntry {
+        id: id.clone(),
+        profile: req.profile_name.clone(),
+        program: target.to_string_lossy().into(),
+        watcher_pid: std::process::id(),
+        app_pid: pid,
+        started: now_unix(),
+        container: appcontainer::box_container_name(box_name),
+        job_name: format!("Local\\Isolated-{id}"),
+    };
+    let _ = entry.save(dirs);
+    Ok(Running {
+        id,
+        app_pid: pid,
+        job: None,
+        process,
+        dirs: dirs.clone(),
+        journal: None,
+        label: file_name_of(&target),
+        marker: None,
+    })
+}
+
+/// Runs in the copy of Isolated started as the sandbox user: starts the app
+/// described in `file` and returns its exit code once all of it has ended.
+pub fn run_as_sandbox_user(file: &Path) -> Result<u32> {
+    let text = std::fs::read(file).map_err(|e| format!("could not read {}: {e}", file.display()))?;
+    let _ = std::fs::remove_file(file);
+    let r: InnerRequest = serde_json::from_slice(&text).map_err(|e| e.to_string())?;
+    let _ = COMPAT_ROOT.set(r.root.clone());
+    let _ = INNER_ID.set((r.id.clone(), r.owner_sid.clone()));
+    let dirs = Dirs::standard();
+    let _ = r.settings.save(&dirs);
+    // Kept folders are the sandbox user's own (its %USERPROFILE%).
+    let b = isolated_core::boxes::AppBox {
+        name: r.app_box.clone(),
+        kept_folders: r.kept_folders.clone(),
+        ..Default::default()
+    };
+    for note in crate::boxes::keep_folders(&r.policy, &b) {
+        let text = note.clone();
+        std::thread::spawn(move || shell::message_box("Isolated", &text, crate::shell::Icon::Warning));
+    }
+    let req = LaunchRequest {
+        profile_name: r.profile_name,
+        target: r.target,
+        args: r.args,
+        accept_weaker: r.accept_weaker,
+        app_box: Some(r.app_box),
+        installer: r.installer,
+        raw_tail: r.raw_tail,
+        workdir: r.workdir,
+    };
+    let result = launch(&dirs, &r.policy, &req).and_then(|run| run.wait());
+    crate::boxes::release_folders(&b);
+    result
+}
+
 pub fn launch(dirs: &Dirs, policy: &Policy, req: &LaunchRequest) -> Result<Running> {
+    if let Some(b) = &req.app_box {
+        if uses_sandbox_user(dirs, policy) {
+            return launch_as_sandbox_user(dirs, policy, req, b);
+        }
+    }
     let weaker: Vec<String> = gaps(policy)
         .into_iter()
         .filter(|g| g.severity == Severity::Weaker)
@@ -683,7 +830,7 @@ pub fn launch(dirs: &Dirs, policy: &Policy, req: &LaunchRequest) -> Result<Runni
         prepared.command_line.push_str(&req.raw_tail);
     }
     let program_key = normalize_path_key(&prepared.program.to_string_lossy());
-    let id = new_sandbox_id();
+    let id = INNER_ID.get().map(|(id, _)| id.clone()).unwrap_or_else(new_sandbox_id);
     let job_name = format!("Local\\Isolated-{id}");
     // All programs of an isolated folder share one identity, so they keep
     // the same settings and can start each other.
@@ -790,6 +937,11 @@ pub fn launch(dirs: &Dirs, policy: &Policy, req: &LaunchRequest) -> Result<Runni
     std::env::set_var("__COMPAT_LAYER", "RunAsInvoker");
 
     let job = Job::create(&job_name, policy).map_err(cleanup_on_error)?;
+    if let Some((_, owner)) = INNER_ID.get() {
+        // Running as the sandbox user: let the signed-in user's Isolated
+        // window stop and measure the app.
+        let _ = super::sandbox_user::allow_on_job(job.handle.raw(), owner);
+    }
 
     let cwd = req
         .workdir
@@ -911,7 +1063,7 @@ pub fn launch(dirs: &Dirs, policy: &Policy, req: &LaunchRequest) -> Result<Runni
     Ok(Running {
         id,
         app_pid,
-        job,
+        job: Some(job),
         process,
         dirs: dirs.clone(),
         journal,
@@ -951,6 +1103,9 @@ fn file_name_of(p: &Path) -> String {
 /// Private folder of a compatible-tier sandbox. Low-integrity processes can
 /// write only under LocalLow.
 pub fn compatible_base(container_name: &str) -> Result<PathBuf> {
+    if let Some(root) = COMPAT_ROOT.get() {
+        return Ok(root.join(container_name));
+    }
     Ok(shell::known_folder(shell::KnownFolder::LocalAppDataLow)
         .ok_or("could not find the LocalLow folder")?
         .join("Isolated")
