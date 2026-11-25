@@ -584,7 +584,11 @@ impl App {
         self.install = Some(InstallForm {
             installer: installer.to_string(),
             box_name,
-            profile: self.settings.default_profile.clone(),
+            profile: if self.store.load("online").is_ok() {
+                "online".to_string()
+            } else {
+                self.settings.default_profile.clone()
+            },
             net: true,
             close_after: false,
             error: None,
@@ -749,6 +753,44 @@ const FOLDER_PROGRAM_LIMIT: usize = 200;
 
 fn weak(ui: &egui::Ui, text: impl Into<String>) -> RichText {
     RichText::new(text.into()).color(ui.visuals().weak_text_color())
+}
+
+/// The protection choice for a new container, in plain words. `others` are
+/// the remaining profiles, offered under "Other".
+fn protection_ui(ui: &mut egui::Ui, id: &str, profile: &mut String, others: &[String]) {
+    ui.vertical(|ui| {
+        ui.radio_value(profile, "online".to_string(), "Locked down (recommended)");
+        ui.label(
+            weak(
+                ui,
+                "Apps can't see your files. Best for most apps, games and command-line AI tools.",
+            )
+            .small(),
+        );
+        ui.radio_value(profile, "compatible".to_string(), "Works with more apps");
+        ui.label(
+            weak(
+                ui,
+                "For apps built on web technology, which can't start when locked down: Electron AI apps (ChatGPT, \
+                 Claude, Discord...), Steam, Kryoto and other WebView2 apps, browsers. What they save still stays \
+                 in the container, but they can read your files and always have internet.",
+            )
+            .small(),
+        );
+        ui.horizontal(|ui| {
+            let other = profile.as_str() != "online" && profile.as_str() != "compatible";
+            if ui.radio(other, "Other profile").clicked() && !other {
+                *profile = "strict".to_string();
+            }
+            egui::ComboBox::from_id_salt(id)
+                .selected_text(if other { profile.as_str() } else { "choose..." })
+                .show_ui(ui, |ui| {
+                    for n in others.iter().filter(|n| *n != "online" && *n != "compatible") {
+                        ui.selectable_value(profile, n.clone(), n);
+                    }
+                });
+        });
+    });
 }
 
 fn gap_ui(ui: &mut egui::Ui, gaps: &[Gap]) {
@@ -1045,7 +1087,11 @@ impl App {
                     {
                         set_net = Some((b.name.clone(), on));
                     }
-                    let profile = format!("profile {}", b.profile);
+                    let profile = match b.profile.as_str() {
+                        "online" => "locked down".to_string(),
+                        "compatible" => "works with more apps".to_string(),
+                        other => format!("profile {other}"),
+                    };
                     ui.label(weak(ui, profile).small());
                     if in_use {
                         ui.label(RichText::new("running").small().color(Color32::from_rgb(80, 160, 90)));
@@ -1187,24 +1233,22 @@ impl App {
                         go = true;
                     }
                     ui.end_row();
-                    ui.label("Profile");
-                    egui::ComboBox::from_id_salt("new_container_profile")
-                        .selected_text(&f.profile)
-                        .show_ui(ui, |ui| {
-                            for n in &names {
-                                ui.selectable_value(&mut f.profile, n.clone(), n);
-                            }
-                        });
+                    ui.label("Protection");
+                    protection_ui(ui, "new_container_profile", &mut f.profile, &names);
                     ui.end_row();
                 });
-            ui.checkbox(&mut f.internet, "Allow internet (apps can download models, sign in, and so on)");
-            ui.label(
-                weak(
-                    ui,
-                    "Apps in the container cannot see your personal files. What they download or save goes into the container's own Documents, Downloads and Desktop.",
-                )
-                .small(),
-            );
+            if f.profile == "compatible" {
+                ui.label(weak(ui, "Apps in this container always have internet.").small());
+            } else {
+                ui.checkbox(&mut f.internet, "Allow internet (apps can download models, sign in, and so on)");
+                ui.label(
+                    weak(
+                        ui,
+                        "Apps in the container cannot see your personal files. What they download or save goes into the container's own Documents, Downloads and Desktop.",
+                    )
+                    .small(),
+                );
+            }
             if let Some(e) = &f.error {
                 ui.label(RichText::new(e).color(Color32::from_rgb(220, 80, 70)));
             }
@@ -1266,17 +1310,11 @@ impl App {
                     });
                     ui.end_row();
                     let existing = box_names.iter().any(|n| n.eq_ignore_ascii_case(f.box_name.trim()));
-                    ui.label("Profile");
+                    ui.label("Protection");
                     if existing {
-                        ui.label(weak(ui, "Uses the container's profile"));
+                        ui.label(weak(ui, "Uses the container's own setting"));
                     } else {
-                        egui::ComboBox::from_id_salt("install_profile")
-                            .selected_text(&f.profile)
-                            .show_ui(ui, |ui| {
-                                for n in &names {
-                                    ui.selectable_value(&mut f.profile, n.clone(), n);
-                                }
-                            });
+                        protection_ui(ui, "install_profile", &mut f.profile, &names);
                     }
                     ui.end_row();
                 });

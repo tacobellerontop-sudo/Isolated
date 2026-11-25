@@ -15,6 +15,9 @@ pub enum Engine {
     Chromium,
     /// The Steam client, which starts its Chromium (CEF) helper itself.
     Steam,
+    /// Apps that show their window with Microsoft WebView2 (Tauri apps and
+    /// others), which starts Edge's engine for them.
+    WebView2,
     Other,
 }
 
@@ -49,9 +52,23 @@ pub fn engine(exe: &Path) -> Engine {
     };
     if has(dir) || dir.join("resources").join("app.asar").is_file() || in_version_folder() {
         Engine::Chromium
+    } else if dir.join("WebView2Loader.dll").is_file() || mentions_webview2(exe) {
+        Engine::WebView2
     } else {
         Engine::Other
     }
+}
+
+/// True if the exe links the WebView2 loader (Tauri and others build it in).
+fn mentions_webview2(exe: &Path) -> bool {
+    const NEEDLE: &[u8] = b"CreateCoreWebView2Environment";
+    match std::fs::metadata(exe) {
+        Ok(m) if m.len() <= 300 * 1024 * 1024 => {}
+        _ => return false,
+    }
+    std::fs::read(exe)
+        .map(|data| data.windows(NEEDLE.len()).any(|w| w == NEEDLE))
+        .unwrap_or(false)
 }
 
 /// Arguments that make a program skip its own sandbox, put before its
@@ -60,7 +77,7 @@ pub fn own_sandbox_off_args(exe: &Path) -> Vec<String> {
     match engine(exe) {
         Engine::Chromium => vec!["--no-sandbox".into()],
         Engine::Steam => vec!["-no-cef-sandbox".into()],
-        Engine::Other => Vec::new(),
+        Engine::WebView2 | Engine::Other => Vec::new(),
     }
 }
 
@@ -75,6 +92,10 @@ mod tests {
         let exe = d.join("AiChat.exe");
         std::fs::write(&exe, b"MZ").unwrap();
         assert_eq!(engine(&exe), Engine::Other);
+        let tauri = d.join("tauri-app.exe");
+        std::fs::write(&tauri, b"MZ...CreateCoreWebView2Environment...").unwrap();
+        assert_eq!(engine(&tauri), Engine::WebView2);
+        std::fs::remove_file(&tauri).unwrap();
         std::fs::create_dir_all(d.join("131.0.2903.70")).unwrap();
         std::fs::write(d.join("131.0.2903.70").join("msedge_elf.dll"), b"").unwrap();
         assert_eq!(engine(&exe), Engine::Chromium);

@@ -568,8 +568,9 @@ if ((Test-Path $ez) -and ((Get-Item $ez).Length -gt 50MB)) {
 }
 Run-Sandboxed @("box", "delete", "SmokeAI") | Out-Null
 
-# 20. A Tauri app's NSIS installer (Tauri apps run on WebView2), in a full
-#     container box and in a compatible box.
+# 20. A Tauri app's NSIS installer (Tauri apps run on WebView2). It quits at
+#     once in a locked-down box (Isolated then offers the compatible tier)
+#     and works in a compatible box.
 $tauri = $null
 try {
     $rel = Invoke-RestMethod -Uri "https://api.github.com/repos/pot-app/pot-desktop/releases/latest" -TimeoutSec 60
@@ -590,7 +591,8 @@ if ($tauri -and (Test-Path $tauri)) {
         $exes = Get-ChildItem -Path (Join-Path $env:LOCALAPPDATA "Packages"), (Join-Path $env:USERPROFILE "AppData\LocalLow\Isolated") -Recurse -Filter "pot*.exe" -ErrorAction SilentlyContinue | ForEach-Object { $_.FullName }
         Write-Host "    pot exes in sandboxes: $($exes -join '; ')"
         Write-Host "    escaped to the real AppData: $(Test-Path (Join-Path $env:LOCALAPPDATA 'pot'))"
-        Check "Tauri NSIS installer saves its app in a $prof box" ($saved.Count -gt 0)
+        if ($prof -eq "compatible") { Check "Tauri NSIS installer saves its app in a $prof box" ($saved.Count -gt 0) }
+        Check "Tauri NSIS installer leaves nothing in the real AppData ($prof box)" (-not (Test-Path (Join-Path $env:LOCALAPPDATA 'pot')))
         Run-Sandboxed @("box", "delete", $bn) | Out-Null
     }
 }
