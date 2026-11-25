@@ -659,6 +659,55 @@ Write-Host "Kryoto box: exit $code, keeps: $($kept.Trim()), copy $($copy.FullNam
 Check "a Kryoto container keeps Kryoto Games by itself" ($null -ne $copy -and -not (Test-Path $kg))
 Run-Sandboxed @("box", "delete", "SmokeKryoto") | Out-Null
 
+# 23. The hidden sandbox user: "Works with more apps" containers run as a
+#     separate Windows account that can't read the user's own folder.
+& $Exe sandbox-user setup 2>&1 | ForEach-Object { Write-Host "    setup: $_" }
+& $Exe sandbox-user status 2>&1 | ForEach-Object { Write-Host "    status: $_" }
+$secret = Join-Path $env:USERPROFILE "iso-secret.txt"
+Set-Content -Path $secret -Value "secret"
+$lowRoot = Join-Path $env:USERPROFILE "AppData\LocalLow\Isolated"
+Run-Sandboxed @("box", "create", "SmokeHidden", "--profile", "compatible") | Out-Null
+$code = Run-Timed @("box", "run", "--accept-weaker", "SmokeHidden", "$env:SystemRoot\System32\cmd.exe", "/d", "/c", "whoami", ">", "%TEMP%\whoami.txt") 120
+$who = Get-ChildItem -Path $lowRoot -Recurse -Filter "whoami.txt" -ErrorAction SilentlyContinue | Select-Object -First 1
+$whoText = if ($who) { (Get-Content $who.FullName -Raw).Trim() } else { "" }
+Write-Host "Hidden user run: exit $code, whoami: $whoText"
+Get-ChildItem -Path $lowRoot -Recurse -Filter "sandbox-user-error.txt" -ErrorAction SilentlyContinue | ForEach-Object { Write-Host "    inner error: $(Get-Content $_.FullName -Raw)" }
+Check "a compatible container's app runs as the hidden user" ($whoText -match "isolatedsandbox")
+$code = Run-Timed @("box", "run", "--accept-weaker", "SmokeHidden", "$env:SystemRoot\System32\cmd.exe", "/d", "/c", "type", $secret) 120
+Write-Host "Reading a file in the user's folder as the hidden user: exit $code"
+Check "the hidden user can't read the user's own files" ($code -ne 0 -and $code -ne "timeout")
+Run-Sandboxed @("box", "delete", "SmokeHidden") | Out-Null
+if ($tauri -and (Test-Path $tauri)) {
+    $code = Run-Timed @("box", "install", "--profile", "compatible", "--accept-weaker", "--box", "SmokeHiddenTauri", "--", $tauri, "/S") 300
+    $t = Get-Content (Join-Path $boxesDir "SmokeHiddenTauri.toml") -Raw -ErrorAction SilentlyContinue
+    $saved = [regex]::Matches("$t", 'path = ["'']([^"'']*)["'']') | ForEach-Object { $_.Groups[1].Value }
+    Write-Host "Tauri installer as the hidden user: exit $code, apps: $($saved -join ', ')"
+    Check "an installer runs as the hidden user and its app is saved" ($saved.Count -gt 0)
+    Run-Sandboxed @("box", "delete", "SmokeHiddenTauri") | Out-Null
+}
+& $Exe sandbox-user remove 2>&1 | ForEach-Object { Write-Host "    remove: $_" }
+Remove-Item $secret -ErrorAction SilentlyContinue
+
+# 24. "Delete unnecessary files" removes a deleted container's files and
+#     temp files, and keeps what a container uses.
+Run-Sandboxed @("box", "create", "SmokeKeepMe", "--profile", "compatible") | Out-Null
+Run-Sandboxed @("box", "create", "SmokeOrphan", "--profile", "compatible") | Out-Null
+$keepHome = (& $Exe box files SmokeKeepMe 2>$null | Select-Object -First 1)
+$orphanHome = (& $Exe box files SmokeOrphan 2>$null | Select-Object -First 1)
+$keepBase = Split-Path $keepHome -Parent
+$orphanBase = Split-Path $orphanHome -Parent
+New-Item -ItemType Directory -Force -Path "$keepBase\Temp\junk", "$keepBase\Setup" | Out-Null
+Set-Content -Path "$keepBase\Temp\junk\a.tmp" -Value "junk"
+Set-Content -Path "$keepBase\Setup\setup.exe" -Value "copy"
+Set-Content -Path "$keepHome\Documents\save.txt" -Value "save"
+Remove-Item (Join-Path $boxesDir "SmokeOrphan.toml")
+& $Exe cleanup 2>&1 | ForEach-Object { Write-Host "    found: $_" }
+& $Exe cleanup --yes 2>&1 | ForEach-Object { Write-Host "    cleanup: $_" }
+Check "cleanup removes a deleted container's files" (-not (Test-Path $orphanBase))
+Check "cleanup removes temp files and installer copies" (-not (Test-Path "$keepBase\Temp\junk") -and -not (Test-Path "$keepBase\Setup"))
+Check "cleanup keeps a container's own files" (Test-Path "$keepHome\Documents\save.txt")
+Run-Sandboxed @("box", "delete", "SmokeKeepMe") | Out-Null
+
 # 21. No program started by the tests above was flagged as leaving its
 #     sandbox (the warning is meant for approved administrator prompts).
 $escLog = Join-Path $env:LOCALAPPDATA "Isolated\escapes.log"

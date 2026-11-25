@@ -1014,3 +1014,299 @@ pub fn spawn_self(args: &[&str]) -> Result<()> {
         .map(|_| ())
         .map_err(|e| format!("could not start Isolated: {e}"))
 }
+
+/// The hidden sandbox user that "Works with more apps" containers run as,
+/// so their apps can't read the signed-in user's folder and settings.
+pub mod sandbox_user {
+    use crate::Result;
+    use isolated_core::{Dirs, Policy};
+
+    /// The Windows account's name.
+    pub const ACCOUNT: &str = "IsolatedSandbox";
+
+    /// True when the sandbox user is set up for this user.
+    pub fn ready(dirs: &Dirs) -> bool {
+        #[cfg(windows)]
+        return crate::win::sandbox_user::ready(dirs);
+        #[cfg(not(windows))]
+        {
+            let _ = dirs;
+            false
+        }
+    }
+
+    /// True if a box with this policy runs as the sandbox user. Its kept
+    /// folders are then that account's, set up by the copy of Isolated
+    /// running as it.
+    pub fn applies(dirs: &Dirs, policy: &Policy) -> bool {
+        #[cfg(windows)]
+        return crate::win::launch::uses_sandbox_user(dirs, policy);
+        #[cfg(not(windows))]
+        {
+            let _ = (dirs, policy);
+            false
+        }
+    }
+
+    /// Creates the account. Needs administrator rights.
+    pub fn setup(dirs: &Dirs) -> Result<()> {
+        #[cfg(windows)]
+        return crate::win::sandbox_user::setup(dirs);
+        #[cfg(not(windows))]
+        {
+            let _ = dirs;
+            Err("only on Windows".into())
+        }
+    }
+
+    /// Deletes the account. Needs administrator rights.
+    pub fn remove(dirs: &Dirs) -> Result<()> {
+        #[cfg(windows)]
+        return crate::win::sandbox_user::remove(dirs);
+        #[cfg(not(windows))]
+        {
+            let _ = dirs;
+            Err("only on Windows".into())
+        }
+    }
+
+    /// Entry point of the copy of Isolated started as the sandbox user.
+    pub fn run_inner(file: &std::path::Path) -> Result<u32> {
+        #[cfg(windows)]
+        return crate::win::launch::run_as_sandbox_user(file);
+        #[cfg(not(windows))]
+        {
+            let _ = file;
+            Err("only on Windows".into())
+        }
+    }
+}
+
+/// Finds and deletes files Isolated no longer needs: folders of deleted
+/// containers, temp files of sandboxes that aren't running, and installer
+/// copies. Never anything a container still uses (its apps, saves or kept
+/// folders).
+pub mod cleanup {
+    use isolated_core::Dirs;
+    use std::path::{Path, PathBuf};
+
+    /// Something that can be deleted.
+    #[derive(Debug, Clone)]
+    pub struct Item {
+        pub path: PathBuf,
+        /// What it is, for users.
+        pub what: String,
+        pub bytes: u64,
+        /// A deleted container's storage, removed through Windows so its
+        /// sandbox identity goes too.
+        container: Option<String>,
+        /// Delete what's inside, keep the folder.
+        contents_only: bool,
+    }
+
+    fn size(p: &Path) -> u64 {
+        match std::fs::symlink_metadata(p) {
+            Ok(m) if m.file_type().is_symlink() => 0,
+            Ok(m) if m.is_dir() => std::fs::read_dir(p)
+                .map(|d| d.flatten().map(|e| size(&e.path())).sum())
+                .unwrap_or(0),
+            Ok(m) => m.len(),
+            Err(_) => 0,
+        }
+    }
+
+    fn not_empty(p: &Path) -> bool {
+        std::fs::read_dir(p).is_ok_and(|mut d| d.next().is_some())
+    }
+
+    /// Every sandbox storage folder: (container name, base folder).
+    fn storages() -> Vec<(String, PathBuf)> {
+        let mut out = Vec::new();
+        #[cfg(windows)]
+        {
+            if let Some(low) = crate::win::shell::known_folder(crate::win::shell::KnownFolder::LocalAppDataLow) {
+                if let Ok(d) = std::fs::read_dir(low.join("Isolated")) {
+                    for e in d.flatten().filter(|e| e.path().is_dir()) {
+                        out.push((e.file_name().to_string_lossy().into_owned(), e.path()));
+                    }
+                }
+            }
+            if let Some(local) = std::env::var_os("LOCALAPPDATA").map(PathBuf::from) {
+                if let Ok(d) = std::fs::read_dir(local.join("Packages")) {
+                    for e in d.flatten() {
+                        let name = e.file_name().to_string_lossy().into_owned();
+                        if name.to_ascii_lowercase().starts_with("isolated.") {
+                            out.push((name, e.path().join("AC")));
+                        }
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    /// What can be deleted now.
+    pub fn scan(dirs: &Dirs) -> Vec<Item> {
+        let boxes: Vec<String> = isolated_core::boxes::AppBox::list(dirs)
+            .iter()
+            .map(|b| crate::boxes::container_name(&b.name).to_ascii_lowercase())
+            .collect();
+        let running: Vec<String> = crate::running(dirs)
+            .iter()
+            .map(|e| e.container.to_ascii_lowercase())
+            .collect();
+        let mut items = Vec::new();
+        for (name, base) in storages() {
+            let key = name.to_ascii_lowercase();
+            if running.contains(&key) {
+                continue;
+            }
+            // Containers made by "box create" or an install: their name is a
+            // hash, so one that no saved container maps to was deleted.
+            if key.starts_with("isolated.b.") && !boxes.contains(&key) {
+                let root = if base.file_name().is_some_and(|n| n == "AC") {
+                    base.parent().map(Path::to_path_buf).unwrap_or(base.clone())
+                } else {
+                    base.clone()
+                };
+                items.push(Item {
+                    bytes: size(&root),
+                    what: "Files of a container that was deleted".into(),
+                    path: root,
+                    container: Some(name.clone()),
+                    contents_only: false,
+                });
+                continue;
+            }
+            let temp = base.join("Temp");
+            if not_empty(&temp) {
+                items.push(Item {
+                    bytes: size(&temp),
+                    what: "Temporary files of apps that aren't running".into(),
+                    path: temp,
+                    container: None,
+                    contents_only: true,
+                });
+            }
+            let setup = base.join("Setup");
+            if not_empty(&setup) {
+                items.push(Item {
+                    bytes: size(&setup),
+                    what: "Copies of installers that already ran".into(),
+                    path: setup,
+                    container: None,
+                    contents_only: false,
+                });
+            }
+        }
+        items.retain(|i| i.bytes > 0 || i.container.is_some());
+        items
+    }
+
+    /// Deletes the items. Returns how many bytes were freed and a note for
+    /// each item that couldn't be deleted (often because something has a
+    /// file in it open).
+    pub fn delete(dirs: &Dirs, items: &[Item]) -> (u64, Vec<String>) {
+        let running: Vec<String> = crate::running(dirs)
+            .iter()
+            .map(|e| e.container.to_ascii_lowercase())
+            .collect();
+        let mut freed = 0;
+        let mut notes = Vec::new();
+        for item in items {
+            if let Some(c) = &item.container {
+                if running.contains(&c.to_ascii_lowercase()) {
+                    continue;
+                }
+                #[cfg(windows)]
+                let _ = crate::win::appcontainer::delete(c);
+            }
+            let result = if item.contents_only {
+                std::fs::read_dir(&item.path)
+                    .map(|d| {
+                        let mut first_err = None;
+                        for e in d.flatten() {
+                            let p = e.path();
+                            let r = if p.is_dir() && !std::fs::symlink_metadata(&p).is_ok_and(|m| m.is_symlink()) {
+                                std::fs::remove_dir_all(&p)
+                            } else {
+                                std::fs::remove_file(&p).or_else(|_| std::fs::remove_dir(&p))
+                            };
+                            if let Err(e) = r {
+                                first_err.get_or_insert(e);
+                            }
+                        }
+                        first_err
+                    })
+                    .map_err(|e| e.to_string())
+                    .and_then(|e| e.map_or(Ok(()), |e| Err(e.to_string())))
+            } else if item.path.exists() {
+                std::fs::remove_dir_all(&item.path).map_err(|e| e.to_string())
+            } else {
+                Ok(())
+            };
+            let left = if item.path.exists() { size(&item.path) } else { 0 };
+            freed += item.bytes.saturating_sub(left);
+            if let Err(e) = result {
+                notes.push(format!("{}: {e}", item.path.display()));
+            }
+        }
+        (freed, notes)
+    }
+
+    /// Empties the hidden sandbox user's own temp folder, which only that
+    /// user can reach: starts a copy of Isolated as it to do so. Returns
+    /// false if there is no hidden user.
+    pub fn sandbox_user_temp(dirs: &Dirs) -> bool {
+        #[cfg(windows)]
+        {
+            if !crate::sandbox_user::ready(dirs) {
+                return false;
+            }
+            let Ok(exe) = std::env::current_exe() else { return false };
+            if let Ok(sid) = crate::win::sandbox_user::sid() {
+                if let Ok(s) = crate::win::acl::StringSid::parse(&sid) {
+                    let _ = crate::win::acl::grant(&exe, s.0, isolated_core::state::Access::Read);
+                }
+            }
+            let cmd = format!("\"{}\" __sandbox-user-clean", exe.display());
+            let cwd = std::env::var_os("SystemRoot")
+                .map(PathBuf::from)
+                .unwrap_or_else(|| PathBuf::from(r"C:\Windows"));
+            crate::win::sandbox_user::spawn(dirs, &exe, &cmd, &cwd).is_ok()
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = dirs;
+            false
+        }
+    }
+
+    /// Run as the hidden user: deletes what's in its temp folder.
+    pub fn own_temp() {
+        if let Some(t) = std::env::var_os("TEMP").map(PathBuf::from) {
+            if let Ok(d) = std::fs::read_dir(&t) {
+                for e in d.flatten() {
+                    let p = e.path();
+                    let _ = std::fs::remove_dir_all(&p).or_else(|_| std::fs::remove_file(&p));
+                }
+            }
+        }
+    }
+
+    /// A size for people: "12.3 MB".
+    pub fn human(bytes: u64) -> String {
+        const UNITS: [&str; 5] = ["bytes", "KB", "MB", "GB", "TB"];
+        let mut v = bytes as f64;
+        let mut u = 0;
+        while v >= 1024.0 && u < UNITS.len() - 1 {
+            v /= 1024.0;
+            u += 1;
+        }
+        if u == 0 {
+            format!("{bytes} bytes")
+        } else {
+            format!("{v:.1} {}", UNITS[u])
+        }
+    }
+}

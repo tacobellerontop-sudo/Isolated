@@ -202,6 +202,10 @@ struct App {
     compat: Option<(bool, Instant)>,
     /// Folder typed in each container's "Keep a folder" field, by box name.
     keep_input: std::collections::HashMap<String, String>,
+    /// Whether the hidden sandbox user is set up, and when that was checked.
+    sandbox_user: Option<(bool, std::time::Instant)>,
+    /// Files found by "Find unnecessary files", waiting for confirmation.
+    cleanup: Option<Vec<isolated_windows::cleanup::Item>>,
 }
 
 impl App {
@@ -238,6 +242,8 @@ impl App {
             confirm_unisolate: None,
             compat: None,
             keep_input: Default::default(),
+            sandbox_user: None,
+            cleanup: None,
             dirs,
         };
         app.reload_boxes();
@@ -2067,6 +2073,105 @@ impl App {
             let _ = self.settings.save(&self.dirs);
         }
         ui.label(weak(ui, "Applies to apps started after a change."));
+
+        ui.add_space(12.0);
+        ui.label(RichText::new("Hide your files from \"Works with more apps\" containers").strong());
+        let ready = match self.sandbox_user {
+            Some((r, at)) if at.elapsed() < std::time::Duration::from_secs(3) => r,
+            _ => {
+                let r = isolated_windows::sandbox_user::ready(&self.dirs);
+                self.sandbox_user = Some((r, std::time::Instant::now()));
+                r
+            }
+        };
+        if ready {
+            ui.label(format!(
+                "On. Their apps run as a hidden Windows user ({}), so they can't read your user folder \
+                 (Documents, Desktop, Downloads, AppData) or your settings. They can still see programs installed \
+                 for everyone, such as those in Program Files.",
+                isolated_windows::sandbox_user::ACCOUNT
+            ));
+            if ui.button("Turn off").clicked() {
+                match isolated_windows::spawn_self(&["sandbox-user", "remove"]) {
+                    Ok(()) => self.set_status("Approve the administrator prompt to remove the hidden user.", false),
+                    Err(e) => self.set_status(e, true),
+                }
+                self.sandbox_user = None;
+            }
+        } else {
+            ui.label(
+                "Off. Apps in these containers can't change your files, but they can read most of them. \
+                 Turning this on creates a hidden Windows user that these apps run as, which Windows keeps out \
+                 of your user folder and settings. Locked-down containers don't need it.",
+            );
+            if ui.button("Turn on (asks for administrator rights once)").clicked() {
+                match isolated_windows::spawn_self(&["sandbox-user", "setup"]) {
+                    Ok(()) => self.set_status("Approve the administrator prompt to create the hidden user.", false),
+                    Err(e) => self.set_status(e, true),
+                }
+                self.sandbox_user = None;
+            }
+        }
+        ui.label(weak(ui, "Applies to apps started after a change."));
+
+        ui.add_space(12.0);
+        ui.label(RichText::new("Delete unnecessary files").strong());
+        ui.label(weak(
+            ui,
+            "Files of containers you deleted, temporary files of apps that aren't running, and copies of \
+             installers that already ran. Never a container's apps, saves or kept folders.",
+        ));
+        let mut cleanup_done = false;
+        let mut cleanup_status = None;
+        match &self.cleanup {
+            None => {
+                if ui.button("Find unnecessary files").clicked() {
+                    self.cleanup = Some(isolated_windows::cleanup::scan(&self.dirs));
+                }
+            }
+            Some(items) if items.is_empty() => {
+                ui.label("Nothing to delete.");
+                if ui.button("OK").clicked() {
+                    cleanup_done = true;
+                }
+            }
+            Some(items) => {
+                let total: u64 = items.iter().map(|i| i.bytes).sum();
+                for i in items {
+                    ui.label(format!("{} ({})", i.what, isolated_windows::cleanup::human(i.bytes)));
+                    ui.label(weak(ui, i.path.display().to_string()));
+                }
+                ui.horizontal(|ui| {
+                    if ui
+                        .button(format!("Delete these ({})", isolated_windows::cleanup::human(total)))
+                        .clicked()
+                    {
+                        let (freed, notes) = isolated_windows::cleanup::delete(&self.dirs, items);
+                        isolated_windows::cleanup::sandbox_user_temp(&self.dirs);
+                        let msg = if notes.is_empty() {
+                            format!("Freed {}.", isolated_windows::cleanup::human(freed))
+                        } else {
+                            format!(
+                                "Freed {}. Some files are in use and were left: {}",
+                                isolated_windows::cleanup::human(freed),
+                                notes.join("; ")
+                            )
+                        };
+                        cleanup_status = Some(msg);
+                        cleanup_done = true;
+                    }
+                    if ui.button("Cancel").clicked() {
+                        cleanup_done = true;
+                    }
+                });
+            }
+        }
+        if cleanup_done {
+            self.cleanup = None;
+        }
+        if let Some(msg) = cleanup_status {
+            self.set_status(msg, false);
+        }
 
         ui.add_space(12.0);
         ui.label(RichText::new("Install").strong());

@@ -64,6 +64,13 @@ Usage:
   isolated repair                       Remove folder access left by interrupted sandboxes
   isolated system-compat                As administrator, once: let Node, Electron and
                                         similar apps start in a sandbox
+  isolated cleanup [--yes]              List (and with --yes delete) files Isolated no
+                                        longer needs: deleted containers' files, temp
+                                        files, installer copies
+  isolated sandbox-user setup|remove|status
+                                        Run 'Works with more apps' containers as a hidden
+                                        Windows user that can't read your files (asks
+                                        for administrator rights once)
   isolated --version
 
 'container' works everywhere 'box' does: a box is what the window calls a
@@ -329,6 +336,109 @@ fn dispatch(args: Vec<OsString>, out: &Out) -> Result<ExitCode, String> {
                 "Node, Electron and similar apps can now start in a sandbox ({n} folder(s) updated)."
             ));
             Ok(ExitCode::SUCCESS)
+        }
+        "sandbox-user" => {
+            // isolated sandbox-user [setup | remove | status]
+            let what = single_value(&mut parser, "setup, remove or status").unwrap_or_else(|_| "status".into());
+            let sandbox_user = isolated_windows::sandbox_user::ACCOUNT;
+            let result = match what.as_str() {
+                "setup" => isolated_windows::sandbox_user::setup(&dirs).map(|()| {
+                    format!(
+                        "Apps in \"Works with more apps\" containers now run as the hidden Windows user {sandbox_user}, \
+                         so they can't read your user folder or your settings."
+                    )
+                }),
+                "remove" => isolated_windows::sandbox_user::remove(&dirs).map(|()| {
+                    format!("Removed {sandbox_user}. \"Works with more apps\" containers run as you again.")
+                }),
+                "status" => Ok(if isolated_windows::sandbox_user::ready(&dirs) {
+                    format!("\"Works with more apps\" containers run as the hidden user {sandbox_user}.")
+                } else {
+                    "\"Works with more apps\" containers run as you. Set up a hidden user with: isolated sandbox-user setup".into()
+                }),
+                other => return Err(format!("unknown sandbox-user command '{other}'")),
+            };
+            match result {
+                Ok(msg) => {
+                    out.info(&msg);
+                    if !out.console && what != "status" {
+                        shell::message_box("Isolated", &msg, Icon::Info);
+                    }
+                    Ok(ExitCode::SUCCESS)
+                }
+                // Not elevated: ask Windows for administrator rights.
+                Err(e) if e.starts_with("access denied") && !out.console => {
+                    let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+                    if shell::run_as_admin(&exe, &format!("sandbox-user {what}")) {
+                        Ok(ExitCode::SUCCESS)
+                    } else {
+                        Err(e)
+                    }
+                }
+                Err(e) => Err(e),
+            }
+        }
+        "cleanup" => {
+            // isolated cleanup [--yes]
+            let yes = flags(&mut parser, &["yes"])?.contains(&"yes");
+            let items = isolated_windows::cleanup::scan(&dirs);
+            let total: u64 = items.iter().map(|i| i.bytes).sum();
+            let mut list = String::new();
+            for i in &items {
+                list.push_str(&format!(
+                    "{} ({}): {}\n",
+                    i.what,
+                    isolated_windows::cleanup::human(i.bytes),
+                    i.path.display()
+                ));
+            }
+            if items.is_empty() {
+                out.info("Nothing to delete.");
+            } else {
+                out.info(&list);
+            }
+            let go = yes
+                || (!out.console
+                    && !items.is_empty()
+                    && shell::confirm(
+                        "Isolated",
+                        &format!(
+                            "Delete these ({})? Nothing a container still uses is in the list.\n\n{list}",
+                            isolated_windows::cleanup::human(total)
+                        ),
+                    ));
+            if !go {
+                if out.console && !items.is_empty() {
+                    out.info("Run 'isolated cleanup --yes' to delete them.");
+                }
+                return Ok(ExitCode::SUCCESS);
+            }
+            let (freed, notes) = isolated_windows::cleanup::delete(&dirs, &items);
+            isolated_windows::cleanup::sandbox_user_temp(&dirs);
+            out.info(&format!("Freed {}.", isolated_windows::cleanup::human(freed)));
+            for n in notes {
+                out.info(&format!("Could not delete {n}"));
+            }
+            Ok(ExitCode::SUCCESS)
+        }
+        // Hidden: started as the sandbox user to empty its temp folder.
+        "__sandbox-user-clean" => {
+            isolated_windows::cleanup::own_temp();
+            Ok(ExitCode::SUCCESS)
+        }
+        // Hidden: started as the sandbox user to run a box's app.
+        "__sandbox-user-run" => {
+            let file = single_path(&mut parser)?;
+            match isolated_windows::sandbox_user::run_inner(&file) {
+                Ok(code) => Ok(ExitCode::from(code.min(255) as u8)),
+                Err(e) => {
+                    // Next to the request, where the signed-in user can read it.
+                    if let Some(dir) = file.parent() {
+                        let _ = std::fs::write(dir.join("sandbox-user-error.txt"), &e);
+                    }
+                    Err(e)
+                }
+            }
         }
         "repair" => {
             let n = isolated_windows::repair(&dirs)?;
@@ -806,7 +916,12 @@ fn box_launch(
         raw_tail: String::new(),
         workdir,
     };
-    let notes = isolated_windows::boxes::keep_folders(&policy, b);
+    // As the sandbox user, the copy of Isolated running as it keeps them.
+    let notes = if isolated_windows::sandbox_user::applies(dirs, &policy) {
+        Vec::new()
+    } else {
+        isolated_windows::boxes::keep_folders(&policy, b)
+    };
     for note in &notes {
         out.info(&format!("Note: {note}"));
     }
@@ -1281,8 +1396,10 @@ fn box_install(mut parser: lexopt::Parser, dirs: &Dirs, store: &ProfileStore, ou
     if b.add_known_kept(&target_s) {
         let _ = b.save(dirs);
     }
-    for note in isolated_windows::boxes::keep_folders(&policy, &b) {
-        out.info(&format!("Note: {note}"));
+    if !isolated_windows::sandbox_user::applies(dirs, &policy) {
+        for note in isolated_windows::boxes::keep_folders(&policy, &b) {
+            out.info(&format!("Note: {note}"));
+        }
     }
 
     let req = LaunchRequest {
