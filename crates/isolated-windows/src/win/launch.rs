@@ -930,6 +930,7 @@ fn start_marker(dirs: &Dirs, policy: &Policy, req: &LaunchRequest, job: &Job) ->
             .window_title_tag
             .then(|| isolated_core::marker::title_tag(label.as_deref())),
     };
+    marker::trace(format_args!("start {opts:?}"));
     Marker::start(job.handle.raw(), opts)
 }
 

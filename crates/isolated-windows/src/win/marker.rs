@@ -61,6 +61,17 @@ const EVENT_OBJECT_NAMECHANGE: u32 = 0x800C;
 const WINEVENT_OUTOFCONTEXT: u32 = 0;
 const WINEVENT_SKIPOWNPROCESS: u32 = 2;
 
+/// Diagnostics for the smoke test: appended to the file named by
+/// `ISOLATED_MARKER_TRACE`, if set.
+pub fn trace(msg: impl std::fmt::Display) {
+    if let Some(path) = std::env::var_os("ISOLATED_MARKER_TRACE") {
+        use std::io::Write;
+        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+            let _ = writeln!(f, "{msg}");
+        }
+    }
+}
+
 impl Marker {
     /// Starts marking the windows of processes in `job`. Returns `None` when
     /// there is nothing to mark or the thread could not start.
@@ -138,6 +149,10 @@ fn run(job: HANDLE, opts: Options, ready: mpsc::Sender<u32>) {
                 placed: RECT::default(),
             })
         });
+        trace(format_args!(
+            "marker thread {tid}: frame {:?}",
+            frame.as_ref().map(|f| f.hwnd.0)
+        ));
         let mut st = State {
             job,
             pids: Vec::new(),
@@ -238,6 +253,12 @@ impl State {
             .is_ok()
         };
         self.pids.clear();
+        if !ok {
+            trace(format_args!(
+                "job pid list failed: {:?}",
+                windows::core::Error::from_thread()
+            ));
+        }
         if ok {
             let list = unsafe { &*(buf.as_ptr() as *const JOBOBJECT_BASIC_PROCESS_ID_LIST) };
             let n = (list.NumberOfProcessIdsInList as usize).min(2048);
@@ -285,14 +306,27 @@ impl State {
 
     fn tag_window(&mut self, hwnd: HWND) {
         let Some(tag) = self.tag.clone() else { return };
-        if !is_app_window(hwnd) || !self.owns(hwnd) {
+        if !is_app_window(hwnd) {
             return;
         }
-        let Some(new) = tagged_title(&window_text(hwnd), &tag) else {
+        if !self.owns(hwnd) {
+            if std::env::var_os("ISOLATED_MARKER_TRACE").is_some() {
+                let mut pid = 0u32;
+                unsafe { GetWindowThreadProcessId(hwnd, Some(&mut pid)) };
+                let title = window_text(hwnd);
+                if title.contains("Notepad") {
+                    trace(format_args!("not ours: {title:?} pid {pid}, job pids {:?}", self.pids));
+                }
+            }
+            return;
+        }
+        let title = window_text(hwnd);
+        let Some(new) = tagged_title(&title, &tag) else {
             return;
         };
-        let text = Wide::new(new);
-        unsafe {
+        let text = Wide::new(&new);
+        let mut result = 0usize;
+        let r = unsafe {
             // Never wait long on an app that is busy or hung.
             SendMessageTimeoutW(
                 hwnd,
@@ -301,9 +335,15 @@ impl State {
                 LPARAM(text.0.as_ptr() as isize),
                 SMTO_ABORTIFHUNG | SMTO_BLOCK,
                 250,
-                None,
-            );
-        }
+                Some(&mut result),
+            )
+        };
+        trace(format_args!(
+            "tag {:?} {title:?} -> sent {} result {result} err {:?}",
+            hwnd.0,
+            r.0,
+            windows::core::Error::from_thread()
+        ));
     }
 
     fn update_frame(&mut self) {
@@ -492,6 +532,7 @@ fn create_frame(color: [u8; 3]) -> Option<HWND> {
             Some(instance.into()),
             None,
         )
+        .map_err(|e| trace(format_args!("frame window: {e}")))
         .ok()?;
         let _ = SetLayeredWindowAttributes(hwnd, COLORREF(0), 255, LWA_ALPHA);
         Some(hwnd)

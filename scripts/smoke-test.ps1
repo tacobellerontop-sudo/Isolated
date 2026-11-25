@@ -603,7 +603,9 @@ Add-Type -Namespace Smoke -Name Win -MemberDefinition @'
 [DllImport("user32.dll", CharSet = CharSet.Unicode)]
 public static extern System.IntPtr FindWindowW(string cls, string title);
 '@
+$env:ISOLATED_MARKER_TRACE = Join-Path $env:TEMP "isolated-marker.txt"
 $watcher = Start-Process -FilePath $Exe -ArgumentList @("run", "--", "$env:SystemRoot\System32\notepad.exe") -PassThru
+Remove-Item Env:ISOLATED_MARKER_TRACE
 $title = ""
 $frame = [System.IntPtr]::Zero
 for ($i = 0; $i -lt 30 -and -not $title.StartsWith("[Isolated"); $i++) {
@@ -612,6 +614,9 @@ for ($i = 0; $i -lt 30 -and -not $title.StartsWith("[Isolated"); $i++) {
     if ($np) { $title = $np.MainWindowTitle }
     $frame = [Smoke.Win]::FindWindowW("IsolatedFrameF5B400", $null)
 }
+Get-CimInstance Win32_Process -Filter "Name='notepad.exe' OR Name='isolated.exe'" | ForEach-Object { Write-Host "    $($_.ProcessId) parent $($_.ParentProcessId) $($_.CommandLine)" }
+Write-Host "    watcher $($watcher.Id) exited: $($watcher.HasExited)"
+Get-Content (Join-Path $env:TEMP "isolated-marker.txt") -ErrorAction SilentlyContinue | Select-Object -First 40 | ForEach-Object { Write-Host "    $_" }
 Check "sandboxed window title is tagged ($title)" ($title.StartsWith("[Isolated] "))
 Check "sandbox window frame exists" ($frame -ne [System.IntPtr]::Zero)
 Get-Process notepad -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
