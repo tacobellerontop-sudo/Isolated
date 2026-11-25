@@ -76,6 +76,12 @@ pub struct Settings {
     pub skipped_version: String,
     /// Profile used for programs without a saved profile.
     pub default_profile: String,
+    /// Draw a colored frame around the active window of a sandboxed app.
+    pub window_frame: bool,
+    /// Frame color, as `#RRGGBB`.
+    pub window_frame_color: String,
+    /// Put `[Isolated]` in front of the titles of sandboxed apps' windows.
+    pub window_title_tag: bool,
 }
 
 impl Default for Settings {
@@ -85,6 +91,9 @@ impl Default for Settings {
             last_update_check: 0,
             skipped_version: String::new(),
             default_profile: crate::profile::DEFAULT_PROFILE.into(),
+            window_frame: true,
+            window_frame_color: crate::marker::DEFAULT_FRAME_COLOR.into(),
+            window_title_tag: true,
         }
     }
 }

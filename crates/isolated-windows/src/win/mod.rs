@@ -8,6 +8,7 @@ pub mod http;
 pub mod install;
 pub mod job;
 pub mod launch;
+pub mod marker;
 pub mod menu;
 pub mod reg;
 pub mod shell;

@@ -4,6 +4,7 @@
 use super::acl;
 use super::appcontainer::{self, Capabilities, ContainerSid};
 use super::job::Job;
+use super::marker::{self, Marker};
 use super::shell;
 use super::util::{err, OwnedHandle, Wide};
 use crate::{LaunchRequest, Result};
@@ -599,6 +600,7 @@ pub struct Running {
     process: OwnedHandle,
     dirs: Dirs,
     journal: Option<JournalEntry>,
+    marker: Option<Marker>,
 }
 
 impl Running {
@@ -611,6 +613,9 @@ impl Running {
 
     pub fn wait(self) -> Result<u32> {
         self.job.wait_empty();
+        if let Some(m) = self.marker {
+            m.stop();
+        }
         let mut code = 0u32;
         unsafe {
             let _ = GetExitCodeProcess(self.process.raw(), &mut code);
@@ -894,6 +899,8 @@ pub fn launch(dirs: &Dirs, policy: &Policy, req: &LaunchRequest) -> Result<Runni
     };
     let _ = entry.save(dirs);
 
+    let marker = start_marker(dirs, policy, req, &job);
+
     Ok(Running {
         id,
         app_pid,
@@ -901,7 +908,29 @@ pub fn launch(dirs: &Dirs, policy: &Policy, req: &LaunchRequest) -> Result<Runni
         process,
         dirs: dirs.clone(),
         journal,
+        marker,
     })
+}
+
+/// Starts marking the sandbox's windows as the settings ask.
+fn start_marker(dirs: &Dirs, policy: &Policy, req: &LaunchRequest, job: &Job) -> Option<Marker> {
+    let settings = isolated_core::Settings::load(dirs);
+    let label = match &req.app_box {
+        Some(b) => Some(b.clone()),
+        None if !policy.folder.trim().is_empty() => Path::new(policy.folder.trim())
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned()),
+        None => None,
+    };
+    let opts = marker::Options {
+        frame: settings
+            .window_frame
+            .then(|| isolated_core::marker::frame_color(&settings.window_frame_color)),
+        tag: settings
+            .window_title_tag
+            .then(|| isolated_core::marker::title_tag(label.as_deref())),
+    };
+    Marker::start(job.handle.raw(), opts)
 }
 
 fn file_name_of(p: &Path) -> String {

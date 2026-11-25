@@ -1974,6 +1974,33 @@ impl App {
         });
 
         ui.add_space(12.0);
+        ui.label(RichText::new("Show which windows are isolated").strong());
+        let mut changed = false;
+        ui.horizontal(|ui| {
+            changed |= ui
+                .checkbox(
+                    &mut self.settings.window_frame,
+                    "Colored frame around the active isolated window",
+                )
+                .changed();
+            let mut rgb = isolated_core::marker::frame_color(&self.settings.window_frame_color);
+            if ui.color_edit_button_srgb(&mut rgb).changed() {
+                self.settings.window_frame_color = isolated_core::marker::format_color(rgb);
+                changed = true;
+            }
+        });
+        changed |= ui
+            .checkbox(
+                &mut self.settings.window_title_tag,
+                "[Isolated] in front of window titles (with the container's name, if it has one)",
+            )
+            .changed();
+        if changed {
+            let _ = self.settings.save(&self.dirs);
+        }
+        ui.label(weak(ui, "Applies to apps started after a change."));
+
+        ui.add_space(12.0);
         ui.label(RichText::new("Install").strong());
         if install::is_running_installed() {
             ui.label("Isolated is installed for this user.");

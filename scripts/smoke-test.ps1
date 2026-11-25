@@ -597,6 +597,27 @@ if ($tauri -and (Test-Path $tauri)) {
     }
 }
 
+# 16. Windows of sandboxed apps are marked: "[Isolated]" in front of the
+#     title, and a frame window that follows the active one.
+Add-Type -Namespace Smoke -Name Win -MemberDefinition @'
+[DllImport("user32.dll", CharSet = CharSet.Unicode)]
+public static extern System.IntPtr FindWindowW(string cls, string title);
+'@
+$watcher = Start-Process -FilePath $Exe -ArgumentList @("run", "--", "$env:SystemRoot\System32\notepad.exe") -PassThru
+$title = ""
+$frame = [System.IntPtr]::Zero
+for ($i = 0; $i -lt 30 -and -not $title.StartsWith("[Isolated"); $i++) {
+    Start-Sleep -Milliseconds 500
+    $np = Get-Process notepad -ErrorAction SilentlyContinue | Where-Object { $_.MainWindowTitle -ne "" } | Select-Object -First 1
+    if ($np) { $title = $np.MainWindowTitle }
+    $frame = [Smoke.Win]::FindWindowW("IsolatedFrameF5B400", $null)
+}
+Check "sandboxed window title is tagged ($title)" ($title.StartsWith("[Isolated] "))
+Check "sandbox window frame exists" ($frame -ne [System.IntPtr]::Zero)
+Get-Process notepad -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+$watcher.WaitForExit(10000) | Out-Null
+if (-not $watcher.HasExited) { $watcher.Kill() }
+
 # 8. Right-click menu registers and unregisters.
 & $Exe register | Out-Null
 Start-Sleep -Milliseconds 500
