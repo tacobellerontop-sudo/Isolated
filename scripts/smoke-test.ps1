@@ -553,10 +553,30 @@ if ((Test-Path $ez) -and ((Get-Item $ez).Length -gt 50MB)) {
     if ($m3.Success) {
         $le = $m3.Groups[1].Value -replace '\\\\', '\'
         Remove-Item "$low\electron-box.txt", "$low\e-box.log" -ErrorAction SilentlyContinue
-        $code = Run-Timed @("box", "run", "--accept-weaker", "SmokeLow", $le, "--enable-logging=file", "--log-file=$low\e-box.log", "$aiHome\eapp", "$low\electron-box.txt") 120
+        $code = Run-Timed @("box", "run", "--accept-weaker", "SmokeLow", $le, "$aiHome\eapp", "$low\electron-box.txt") 120
         $res = Get-Content "$low\electron-box.txt" -ErrorAction SilentlyContinue
         Write-Host "INFO  Electron in a compatible box: exit $code, result: $res"
-        Get-Content "$low\e-box.log" -ErrorAction SilentlyContinue | Where-Object { $_ -match "ERROR|FATAL|denied" } | Select-Object -Last 15 | ForEach-Object { Write-Host "    $_" }
+        if ($python) {
+            Set-Content -Path "$low\erun.py" -Value @"
+import subprocess, os, sys
+out = []
+for name, extra in (('plain', []), ('no-sandbox', ['--no-sandbox']), ('user-data-dir', ['--no-sandbox', r'--user-data-dir=$low\ud'])):
+    target = r'$low\e-' + name + '.txt'
+    e = dict(os.environ, ELECTRON_ENABLE_LOGGING='1', ELECTRON_ENABLE_STACK_DUMPING='1')
+    try:
+        r = subprocess.run([r'$le'] + extra + [r'$aiHome\eapp', target], capture_output=True, timeout=45, env=e)
+        code = hex(r.returncode & 0xffffffff); text = (r.stdout + r.stderr).decode('utf-8', 'replace')
+    except subprocess.TimeoutExpired as t:
+        code = 'timeout'; text = ((t.stdout or b'') + (t.stderr or b'')).decode('utf-8', 'replace')
+    res = open(target).read() if os.path.exists(target) else ''
+    out.append(name + ': exit ' + code + ', result: ' + res)
+    out.extend('      ' + l[:200] for l in [l for l in text.splitlines() if l.strip()][-12:])
+    open(r'$low\erun.txt', 'w').write('\n'.join(out))
+"@
+            $code = Run-Timed @("box", "run", "--accept-weaker", "SmokeLow", $python, "$low\erun.py") 200
+            Write-Host "Electron started by Python in a compatible box (exit $code):"
+            Get-Content "$low\erun.txt" -ErrorAction SilentlyContinue | ForEach-Object { Write-Host "    $_" }
+        }
     }
     Run-Sandboxed @("box", "delete", "SmokeLow") | Out-Null
 }
