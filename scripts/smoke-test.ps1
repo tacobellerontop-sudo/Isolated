@@ -367,6 +367,22 @@ fetch('https://github.com').then(r => process.exit(r.ok ? 0 : 9), e => { fs.writ
         Get-Content "$aiHome\node-out.txt" -ErrorAction SilentlyContinue | ForEach-Object { Write-Host "    node: $_" }
     }
 }
+if ($node -and (Test-Path $aiHome)) {
+    Remove-Item "$aiHome\.cache\probe\node.txt" -ErrorAction SilentlyContinue
+    $code = Run-Timed @("box", "run", "SmokeAI", $node, "--preserve-symlinks", "--preserve-symlinks-main", "probe.js") 120
+    Write-Host "INFO  Node with --preserve-symlinks: exit $code, home file $(Test-Path "$aiHome\.cache\probe\node.txt")"
+    Set-Content -Path "$aiHome\walk.js" -Value @'
+const fs = require('fs'), path = require('path');
+let p = process.cwd(), parts = [];
+while (true) { parts.unshift(p); const q = path.dirname(p); if (q === p) break; p = q; }
+const out = parts.map(x => { try { fs.lstatSync(x); return 'ok ' + x; } catch (e) { return e.code + ' ' + x; } });
+try { out.push('realpath.native ' + fs.realpathSync.native(process.cwd())); } catch (e) { out.push('realpath.native ' + e.code); }
+fs.writeFileSync('walk.txt', out.join('\n'));
+'@
+    Run-Timed @("box", "run", "SmokeAI", $node, "--preserve-symlinks", "--preserve-symlinks-main", "walk.js") 60 | Out-Null
+    Write-Host "Which parent folders a sandboxed program can look at:"
+    Get-Content "$aiHome\walk.txt" -ErrorAction SilentlyContinue | ForEach-Object { Write-Host "    $_" }
+}
 $python = (Get-Command python -ErrorAction SilentlyContinue).Source
 if ($python -and (Test-Path $aiHome)) {
     Set-Content -Path "$aiHome\probe.py" -Value @'
@@ -430,12 +446,35 @@ app.whenReady().then(async () => {
 '@
     # Can a program inside the container start other programs stored in it?
     # (Electron apps start copies of themselves; CLI agents start tools.)
-    $probeLine = "copy /y %SystemRoot%\System32\whoami.exe %USERPROFILE%\w2.exe >nul & %USERPROFILE%\w2.exe > o-inside.txt 2>&1 & `"$aiHome\node.exe`" -v > o-node.txt 2>&1 & whoami > o-sys.txt 2>&1"
-    Run-Timed @("box", "run", "SmokeAI", $cmd, "/d", "/c", $probeLine) 60 | Out-Null
-    foreach ($f in @("o-inside", "o-node", "o-sys")) { Write-Host "INFO  child start ${f}: $(Get-Content "$aiHome\$f.txt" -ErrorAction SilentlyContinue)" }
-    Write-Host "ACL of node.exe copy:"; icacls "$aiHome\node.exe" | Out-Host
-    Write-Host "ACL of w2.exe (made inside):"; icacls "$aiHome\w2.exe" | Out-Host
-    Write-Host "ACL of the AC folder:"; icacls (Split-Path $aiHome) | Out-Host
+    $aiTemp = Join-Path (Split-Path $aiHome) "Temp"
+    Copy-Item $node "$aiTemp\node4.exe"
+    $electronPath = if ($m.Success) { $m.Groups[1].Value -replace '\\\\', '\' } else { "" }
+    Set-Content -Path "$aiHome\spawn.py" -Value @"
+import subprocess, os, shutil, traceback
+res = []
+def t(name, path, arg='-v'):
+    try:
+        r = subprocess.run([path, arg], capture_output=True, timeout=60)
+        res.append(name + ': ok ' + str(r.returncode))
+    except Exception as e:
+        res.append(name + ': ' + repr(e))
+home = os.environ['USERPROFILE']; temp = os.environ['TEMP']
+t('outside copy in Home', home + r'\node.exe')
+try:
+    shutil.copy(home + r'\node.exe', home + r'\node2.exe'); t('inside copy in Home', home + r'\node2.exe')
+    shutil.copy(home + r'\node.exe', temp + r'\node3.exe'); t('inside copy in Temp', temp + r'\node3.exe')
+except Exception as e:
+    res.append('copy: ' + repr(e))
+t('outside copy in Temp', temp + r'\node4.exe')
+t('system whoami', os.environ['SystemRoot'] + r'\System32\whoami.exe', '/user')
+if r'$electronPath':
+    t('unpacked electron', r'$electronPath', '--version')
+open('spawn.txt', 'w').write('\n'.join(res))
+"@
+    $code = Run-Timed @("box", "run", "SmokeAI", $python, "spawn.py") 300
+    Write-Host "Starting programs from inside a container (exit $code):"
+    Get-Content "$aiHome\spawn.txt" -ErrorAction SilentlyContinue | ForEach-Object { Write-Host "    $_" }
+    foreach ($f in @("$aiHome\node.exe", "$aiHome\node2.exe", "$aiTemp\node3.exe", "$aiTemp\node4.exe")) { icacls $f | Out-Host; (Get-Acl $f -ErrorAction SilentlyContinue).Owner | Out-Host }
     $code = Run-Timed @("box", "run", "SmokeAI", "$aiHome\node.exe", "probe.js") 60
     Write-Host "INFO  node.exe copy started directly: exit $code"
     if ($m.Success) {
