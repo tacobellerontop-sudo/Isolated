@@ -612,7 +612,7 @@ for ($i = 0; $i -lt 30 -and -not $title.StartsWith("[Isolated"); $i++) {
     Start-Sleep -Milliseconds 500
     $np = Get-Process notepad -ErrorAction SilentlyContinue | Where-Object { $_.MainWindowTitle -ne "" } | Select-Object -First 1
     if ($np) { $title = $np.MainWindowTitle }
-    $frame = [Smoke.Win]::FindWindowW("IsolatedFrameF5B400", $null)
+    $frame = [Smoke.Win]::FindWindowW("IsolatedFrameF5B400", "Isolated")
 }
 Get-CimInstance Win32_Process -Filter "Name='notepad.exe' OR Name='isolated.exe'" | ForEach-Object { Write-Host "    $($_.ProcessId) parent $($_.ParentProcessId) $($_.CommandLine)" }
 Write-Host "    watcher $($watcher.Id) exited: $($watcher.HasExited)"

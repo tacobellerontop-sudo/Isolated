@@ -261,8 +261,10 @@ impl State {
         }
         if ok {
             let list = unsafe { &*(buf.as_ptr() as *const JOBOBJECT_BASIC_PROCESS_ID_LIST) };
-            let n = (list.NumberOfProcessIdsInList as usize).min(2048);
-            self.pids.extend(buf[2..2 + n].iter().map(|&p| p as u32));
+            let n = (list.NumberOfProcessIdsInList as usize).min(buf.len() - 1);
+            // The header is two u32 counts (one usize), then the ids.
+            let ids = unsafe { std::slice::from_raw_parts(list.ProcessIdList.as_ptr(), n) };
+            self.pids.extend(ids.iter().map(|&p| p as u32));
         }
     }
 
