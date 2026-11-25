@@ -131,7 +131,14 @@ fn run(job: HANDLE, label: &str, log: &std::path::Path, stop: &AtomicBool) {
                 continue;
             }
             warned.insert(pid);
-            let detail = describe(pid);
+            let (detail, level) = describe(pid);
+            // A low-integrity process (like Edge's identity_helper, which
+            // Edge starts through a Windows broker) can't change the PC
+            // either; only medium or higher (a normal or administrator
+            // program) has really left.
+            if level.is_some_and(|l| l < MEDIUM_INTEGRITY) {
+                continue;
+            }
             let text = format!(
                 "{label} (in a sandbox) got {name} started outside the sandbox, most likely through an administrator prompt.\n\n\
                  {name} is not isolated: it can see and change your PC, with administrator rights if you approved them. \
@@ -152,8 +159,10 @@ fn run(job: HANDLE, label: &str, log: &std::path::Path, stop: &AtomicBool) {
     }
 }
 
-/// Path and integrity level of a process, for the log.
-fn describe(pid: u32) -> String {
+const MEDIUM_INTEGRITY: u32 = 0x2000;
+
+/// Path and integrity level of a process, for the log, and the level.
+fn describe(pid: u32) -> (String, Option<u32>) {
     use windows::Win32::Security::{
         GetSidSubAuthority, GetSidSubAuthorityCount, GetTokenInformation, TokenIntegrityLevel, TOKEN_MANDATORY_LABEL,
         TOKEN_QUERY,
@@ -164,7 +173,7 @@ fn describe(pid: u32) -> String {
     };
     unsafe {
         let Ok(p) = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) else {
-            return "gone or not readable".into();
+            return ("gone or not readable".into(), None);
         };
         let p = OwnedHandle(p);
         let mut buf = [0u16; 1024];
@@ -181,7 +190,7 @@ fn describe(pid: u32) -> String {
         } else {
             "?".into()
         };
-        let mut level = String::from("?");
+        let mut level = None;
         let mut tok = HANDLE::default();
         if OpenProcessToken(p.raw(), TOKEN_QUERY, &mut tok).is_ok() {
             let tok = OwnedHandle(tok);
@@ -199,11 +208,12 @@ fn describe(pid: u32) -> String {
                 let label = &*(info.as_ptr() as *const TOKEN_MANDATORY_LABEL);
                 let count = *GetSidSubAuthorityCount(label.Label.Sid);
                 if count > 0 {
-                    level = format!("{:#x}", *GetSidSubAuthority(label.Label.Sid, count as u32 - 1));
+                    level = Some(*GetSidSubAuthority(label.Label.Sid, count as u32 - 1));
                 }
             }
         }
-        format!("{path}, integrity {level}")
+        let shown = level.map_or("?".to_string(), |l| format!("{l:#x}"));
+        (format!("{path}, integrity {shown}"), level)
     }
 }
 
