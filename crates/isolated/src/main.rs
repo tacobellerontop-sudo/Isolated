@@ -64,6 +64,9 @@ Usage:
   isolated repair                       Remove folder access left by interrupted sandboxes
   isolated system-compat                As administrator, once: let Node, Electron and
                                         similar apps start in a sandbox
+  isolated cleanup [--yes]              List (and with --yes delete) files Isolated no
+                                        longer needs: deleted containers' files, temp
+                                        files, installer copies
   isolated sandbox-user setup|remove|status
                                         Run 'Works with more apps' containers as a hidden
                                         Windows user that can't read your files (asks
@@ -374,6 +377,54 @@ fn dispatch(args: Vec<OsString>, out: &Out) -> Result<ExitCode, String> {
                 }
                 Err(e) => Err(e),
             }
+        }
+        "cleanup" => {
+            // isolated cleanup [--yes]
+            let yes = flags(&mut parser, &["yes"])?.contains(&"yes");
+            let items = isolated_windows::cleanup::scan(&dirs);
+            let total: u64 = items.iter().map(|i| i.bytes).sum();
+            let mut list = String::new();
+            for i in &items {
+                list.push_str(&format!(
+                    "{} ({}): {}\n",
+                    i.what,
+                    isolated_windows::cleanup::human(i.bytes),
+                    i.path.display()
+                ));
+            }
+            if items.is_empty() {
+                out.info("Nothing to delete.");
+            } else {
+                out.info(&list);
+            }
+            let go = yes
+                || (!out.console
+                    && !items.is_empty()
+                    && shell::confirm(
+                        "Isolated",
+                        &format!(
+                            "Delete these ({})? Nothing a container still uses is in the list.\n\n{list}",
+                            isolated_windows::cleanup::human(total)
+                        ),
+                    ));
+            if !go {
+                if out.console && !items.is_empty() {
+                    out.info("Run 'isolated cleanup --yes' to delete them.");
+                }
+                return Ok(ExitCode::SUCCESS);
+            }
+            let (freed, notes) = isolated_windows::cleanup::delete(&dirs, &items);
+            isolated_windows::cleanup::sandbox_user_temp(&dirs);
+            out.info(&format!("Freed {}.", isolated_windows::cleanup::human(freed)));
+            for n in notes {
+                out.info(&format!("Could not delete {n}"));
+            }
+            Ok(ExitCode::SUCCESS)
+        }
+        // Hidden: started as the sandbox user to empty its temp folder.
+        "__sandbox-user-clean" => {
+            isolated_windows::cleanup::own_temp();
+            Ok(ExitCode::SUCCESS)
         }
         // Hidden: started as the sandbox user to run a box's app.
         "__sandbox-user-run" => {

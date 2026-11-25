@@ -204,6 +204,8 @@ struct App {
     keep_input: std::collections::HashMap<String, String>,
     /// Whether the hidden sandbox user is set up, and when that was checked.
     sandbox_user: Option<(bool, std::time::Instant)>,
+    /// Files found by "Find unnecessary files", waiting for confirmation.
+    cleanup: Option<Vec<isolated_windows::cleanup::Item>>,
 }
 
 impl App {
@@ -241,6 +243,7 @@ impl App {
             compat: None,
             keep_input: Default::default(),
             sandbox_user: None,
+            cleanup: None,
             dirs,
         };
         app.reload_boxes();
@@ -2110,6 +2113,65 @@ impl App {
             }
         }
         ui.label(weak(ui, "Applies to apps started after a change."));
+
+        ui.add_space(12.0);
+        ui.label(RichText::new("Delete unnecessary files").strong());
+        ui.label(weak(
+            ui,
+            "Files of containers you deleted, temporary files of apps that aren't running, and copies of \
+             installers that already ran. Never a container's apps, saves or kept folders.",
+        ));
+        let mut cleanup_done = false;
+        let mut cleanup_status = None;
+        match &self.cleanup {
+            None => {
+                if ui.button("Find unnecessary files").clicked() {
+                    self.cleanup = Some(isolated_windows::cleanup::scan(&self.dirs));
+                }
+            }
+            Some(items) if items.is_empty() => {
+                ui.label("Nothing to delete.");
+                if ui.button("OK").clicked() {
+                    cleanup_done = true;
+                }
+            }
+            Some(items) => {
+                let total: u64 = items.iter().map(|i| i.bytes).sum();
+                for i in items {
+                    ui.label(format!("{} ({})", i.what, isolated_windows::cleanup::human(i.bytes)));
+                    ui.label(weak(ui, i.path.display().to_string()));
+                }
+                ui.horizontal(|ui| {
+                    if ui
+                        .button(format!("Delete these ({})", isolated_windows::cleanup::human(total)))
+                        .clicked()
+                    {
+                        let (freed, notes) = isolated_windows::cleanup::delete(&self.dirs, items);
+                        isolated_windows::cleanup::sandbox_user_temp(&self.dirs);
+                        let msg = if notes.is_empty() {
+                            format!("Freed {}.", isolated_windows::cleanup::human(freed))
+                        } else {
+                            format!(
+                                "Freed {}. Some files are in use and were left: {}",
+                                isolated_windows::cleanup::human(freed),
+                                notes.join("; ")
+                            )
+                        };
+                        cleanup_status = Some(msg);
+                        cleanup_done = true;
+                    }
+                    if ui.button("Cancel").clicked() {
+                        cleanup_done = true;
+                    }
+                });
+            }
+        }
+        if cleanup_done {
+            self.cleanup = None;
+        }
+        if let Some(msg) = cleanup_status {
+            self.set_status(msg, false);
+        }
 
         ui.add_space(12.0);
         ui.label(RichText::new("Install").strong());
