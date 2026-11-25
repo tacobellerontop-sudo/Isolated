@@ -177,6 +177,16 @@ gives them their own `HOME` and AppData.
   to their exe and turns off their own inner sandbox, which can't start
   there (`--no-sandbox`, `-no-cef-sandbox` for Steam, and
   `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS` for WebView2 apps).
+- **Apps that insist on a folder in your user folder** (for example a game
+  launcher that saves to `C:\Users\you\Kryoto Games`): add that folder
+  under **Folders from your PC kept in this container** on the container's
+  card, or run `isolated box keep "AI apps" "C:\Users\you\Kryoto Games"`.
+  While the container's apps run, the path is a link into the container's
+  own copy, removed again when they close.
+- Programs in a container that ask for administrator rights start without
+  them. If you approve an administrator prompt that an app in a container
+  still shows, Windows starts that program outside the container, and
+  Isolated warns you.
 - Games whose anti-cheat installs a kernel driver can't run in any sandbox.
 
 **Choosing folders.** **Run in Isolated with folders...** opens a small
