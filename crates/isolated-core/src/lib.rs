@@ -9,6 +9,7 @@ pub mod boxes;
 pub mod bundle;
 pub mod cabinet;
 pub mod cmdline;
+pub mod marker;
 pub mod msi;
 pub mod policy;
 pub mod profile;
