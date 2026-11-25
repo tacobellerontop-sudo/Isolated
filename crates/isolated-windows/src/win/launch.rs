@@ -644,12 +644,15 @@ pub fn launch(dirs: &Dirs, policy: &Policy, req: &LaunchRequest) -> Result<Runni
     let mut prepared = prepare(&req.target, &req.args, 0, req.installer)?;
     if policy.tier == Tier::Isolated
         && !req.installer
-        && isolated_core::apps::engine(&prepared.program) != isolated_core::apps::Engine::Other
+        && matches!(
+            isolated_core::apps::engine(&prepared.program),
+            isolated_core::apps::Engine::Chromium | isolated_core::apps::Engine::Steam
+        )
     {
         return Err(format!(
-            "{} is built on Chromium (like Electron apps, Steam and web browsers), which can't start in a full \
-             container: Windows doesn't let it create the pipes it needs there. Use the compatible profile instead. \
-             For an installed app, install it again into a box with the compatible profile; its files still stay in the box.",
+            "{} is built on web technology (Chromium or WebView2, like Electron apps, Steam and Kryoto), which \
+             Windows doesn't let start in a locked-down container. Install it into a container set to \
+             \"Works with more apps\" (the compatible profile) instead; what it saves still stays in that container.",
             file_name_of(&prepared.program)
         ));
     }

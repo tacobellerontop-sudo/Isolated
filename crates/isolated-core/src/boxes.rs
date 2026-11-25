@@ -418,13 +418,26 @@ pub fn detect_installer(head: &[u8]) -> InstallerKind {
 /// Extra arguments that ask an installer to install for the current user
 /// only, into `dir` when the installer lets us choose. Users' own arguments
 /// come after these, except NSIS's `/D=` which must be last.
-pub fn per_user_args(kind: InstallerKind, dir: &str, has_user_args: bool) -> (Vec<String>, Vec<String>) {
+pub fn per_user_args(kind: InstallerKind, dir: &str, user_args: &[String]) -> (Vec<String>, Vec<String>) {
     match kind {
         InstallerKind::Inno => (vec!["/CURRENTUSER".into(), format!("/DIR={dir}")], vec![]),
         // `/currentuser` picks the per-user mode of installers made with
         // electron-builder (most Electron apps); other NSIS installers
         // ignore it. `/D=` must be the last argument and is never quoted.
-        InstallerKind::Nsis if !has_user_args => (vec!["/currentuser".into()], vec![format!("/D={dir}")]),
+        // Silent switches such as `/S` keep both.
+        InstallerKind::Nsis => {
+            let has = |f: &dyn Fn(&str) -> bool| user_args.iter().any(|a| f(a));
+            let mut pre = Vec::new();
+            if !has(&|a| a.eq_ignore_ascii_case("/currentuser") || a.eq_ignore_ascii_case("/allusers")) {
+                pre.push("/currentuser".into());
+            }
+            let post = if has(&|a| a.starts_with("/D=")) {
+                vec![]
+            } else {
+                vec![format!("/D={dir}")]
+            };
+            (pre, post)
+        }
         _ => (vec![], vec![]),
     }
 }
@@ -646,11 +659,15 @@ mod tests {
         assert_eq!(detect_installer(b"xx Inno Setup yy"), InstallerKind::Inno);
         assert_eq!(detect_installer(b"Nullsoft Install System"), InstallerKind::Nsis);
         assert_eq!(detect_installer(b"MZ...."), InstallerKind::Other);
-        let (pre, post) = per_user_args(InstallerKind::Nsis, r"C:\x y\App", false);
+        let (pre, post) = per_user_args(InstallerKind::Nsis, r"C:\x y\App", &[]);
         assert_eq!(pre, vec!["/currentuser".to_string()]);
         assert_eq!(post, vec![r"/D=C:\x y\App".to_string()]);
-        assert!(per_user_args(InstallerKind::Nsis, "d", true).1.is_empty());
-        assert_eq!(per_user_args(InstallerKind::Inno, "d", false).0[0], "/CURRENTUSER");
+        assert!(per_user_args(InstallerKind::Nsis, "d", &["/D=x".into()]).1.is_empty());
+        assert_eq!(
+            per_user_args(InstallerKind::Nsis, "d", &["/S".into()]).1,
+            vec!["/D=d".to_string()]
+        );
+        assert_eq!(per_user_args(InstallerKind::Inno, "d", &[]).0[0], "/CURRENTUSER");
         assert_eq!(detect_installer(b"..InstallShield.."), InstallerKind::InstallShield);
         assert!(explain_exit(InstallerKind::Other, 740).is_some());
         assert!(explain_exit(InstallerKind::Burn, 0).is_none());

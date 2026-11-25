@@ -1077,11 +1077,25 @@ fn box_install(mut parser: lexopt::Parser, dirs: &Dirs, store: &ProfileStore, ou
         None => isolated_core::boxes::suggest_name(dirs, &target_s),
     };
     isolated_core::boxes::check_name(&box_name)?;
+    let was_new = AppBox::load(dirs, &box_name).is_none();
+    // A container with no apps yet (for example from a failed install).
+    let was_empty = AppBox::load(dirs, &box_name).is_none_or(|b| b.apps.is_empty());
     let mut b = match AppBox::load(dirs, &box_name) {
         Some(b) => b,
         None => {
             let settings = Settings::load(dirs);
-            let p = profile.clone().unwrap_or(settings.default_profile);
+            let web = isolated_core::apps::installer_looks_web(
+                &target
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_default(),
+            );
+            let fallback = if web {
+                "compatible".to_string()
+            } else {
+                settings.default_profile
+            };
+            let p = profile.clone().unwrap_or(fallback);
             let p = if store.load(&p).is_ok() {
                 p
             } else {
@@ -1191,10 +1205,11 @@ fn box_install(mut parser: lexopt::Parser, dirs: &Dirs, store: &ProfileStore, ou
         let app_dir = isolated_core::boxes::name_from_installer(&target_s);
         let base = alias.as_ref().map(|a| a.root()).unwrap_or_else(|| folder.clone());
         let dir = isolated_windows::boxes::install_dir(&policy, &base, &app_dir);
-        let (p, tail) = isolated_core::boxes::per_user_args(kind, &dir.to_string_lossy(), !args.is_empty());
+        let (p, tail) = isolated_core::boxes::per_user_args(kind, &dir.to_string_lossy(), &args);
         pre = p;
         raw_tail = tail.join(" ");
     }
+    let args_given = args.clone();
     pre.extend(args);
 
     let req = LaunchRequest {
@@ -1225,8 +1240,50 @@ fn box_install(mut parser: lexopt::Parser, dirs: &Dirs, store: &ProfileStore, ou
     // Re-read: the window may have changed the box while we waited.
     let mut b = AppBox::load(dirs, &b.name).unwrap_or(b);
     let names: Vec<String> = found.iter().map(|a| a.name.clone()).collect();
+    let web_app = found
+        .iter()
+        .any(|a| isolated_core::apps::engine(std::path::Path::new(&a.path)) != isolated_core::apps::Engine::Other);
     let added = b.add_apps(found);
     b.save(dirs)?;
+
+    // Apps built on web technology can't start locked down, and some of
+    // their installers (Tauri's) quit at once there. Offer the compatible
+    // tier, where they work and still write only into the box.
+    let failed = added == 0 && b.apps.is_empty() && captured.is_empty();
+    if policy.tier == Tier::Isolated && was_empty && (failed || web_app) && store.load("compatible").is_ok() {
+        let what = target
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let ask = format!(
+            "{} {what} needs a container set to \"Works with more apps\".\n\nApps built on web technology (Electron AI apps, Steam, Kryoto and other WebView2 apps) can't run locked down. In a \"Works with more apps\" container, what they save still stays in the container, but they can read your files and always have internet.\n\nInstall it that way instead?",
+            if failed { "The installer couldn't run in a locked-down container." } else { "This app is built on web technology:" }
+        );
+        let retry = if out.console {
+            out.info(&format!(
+                "{ask}\nTo do that, run: isolated box install --profile compatible --box \"{}\" -- \"{}\"",
+                b.name,
+                target.display()
+            ));
+            false
+        } else {
+            shell::confirm("Isolated", &ask)
+        };
+        if retry {
+            if was_new {
+                isolated_windows::boxes::remove(dirs, &b.name)?;
+            }
+            let mut again: Vec<std::ffi::OsString> = ["--profile", "compatible", "--accept-weaker", "--box"]
+                .iter()
+                .map(|a| a.into())
+                .collect();
+            again.push(b.name.clone().into());
+            again.push("--".into());
+            again.push(target.clone().into_os_string());
+            again.extend(args_given.iter().map(|a| a.into()));
+            return box_install(lexopt::Parser::from_args(again), dirs, store, out);
+        }
+    }
 
     // The installer handed a package to Windows Installer, which failed in
     // the sandbox: unpack what it tried to install.

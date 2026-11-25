@@ -568,6 +568,35 @@ if ((Test-Path $ez) -and ((Get-Item $ez).Length -gt 50MB)) {
 }
 Run-Sandboxed @("box", "delete", "SmokeAI") | Out-Null
 
+# 20. A Tauri app's NSIS installer (Tauri apps run on WebView2). It quits at
+#     once in a locked-down box (Isolated then offers the compatible tier)
+#     and works in a compatible box.
+$tauri = $null
+try {
+    $rel = Invoke-RestMethod -Uri "https://api.github.com/repos/pot-app/pot-desktop/releases/latest" -TimeoutSec 60
+    $asset = $rel.assets | Where-Object { $_.name -match "_x64-setup\.exe$" } | Select-Object -First 1
+    if ($asset) {
+        $tauri = Join-Path $instDir $asset.name
+        & $curl -sSL -m 300 -o $tauri $asset.browser_download_url
+    }
+} catch { Write-Host "SKIP  could not look up a Tauri installer: $_" }
+if ($tauri -and (Test-Path $tauri)) {
+    foreach ($prof in @("strict", "compatible")) {
+        $bn = "SmokeTauri-$prof"
+        $code = Run-Timed @("box", "install", "--profile", $prof, "--accept-weaker", "--box", $bn, "--", $tauri, "/S") 300
+        $t = Get-Content (Join-Path $boxesDir "$bn.toml") -Raw -ErrorAction SilentlyContinue
+        $saved = [regex]::Matches("$t", 'path = ["'']([^"'']*)["'']') | ForEach-Object { $_.Groups[1].Value }
+        Write-Host "Tauri NSIS installer in a $prof box: exit $code, apps: $($saved -join ', ')"
+        $bf = (& $Exe box files $bn 2>$null | Select-Object -First 1)
+        $exes = Get-ChildItem -Path (Join-Path $env:LOCALAPPDATA "Packages"), (Join-Path $env:USERPROFILE "AppData\LocalLow\Isolated") -Recurse -Filter "pot*.exe" -ErrorAction SilentlyContinue | ForEach-Object { $_.FullName }
+        Write-Host "    pot exes in sandboxes: $($exes -join '; ')"
+        Write-Host "    escaped to the real AppData: $(Test-Path (Join-Path $env:LOCALAPPDATA 'pot'))"
+        if ($prof -eq "compatible") { Check "Tauri NSIS installer saves its app in a $prof box" ($saved.Count -gt 0) }
+        Check "Tauri NSIS installer leaves nothing in the real AppData ($prof box)" (-not (Test-Path (Join-Path $env:LOCALAPPDATA 'pot')))
+        Run-Sandboxed @("box", "delete", $bn) | Out-Null
+    }
+}
+
 # 8. Right-click menu registers and unregisters.
 & $Exe register | Out-Null
 Start-Sleep -Milliseconds 500

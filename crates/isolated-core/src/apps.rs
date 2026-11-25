@@ -15,6 +15,9 @@ pub enum Engine {
     Chromium,
     /// The Steam client, which starts its Chromium (CEF) helper itself.
     Steam,
+    /// Apps that show their window with Microsoft WebView2 (Tauri apps and
+    /// others), which starts Edge's engine for them.
+    WebView2,
     Other,
 }
 
@@ -49,9 +52,23 @@ pub fn engine(exe: &Path) -> Engine {
     };
     if has(dir) || dir.join("resources").join("app.asar").is_file() || in_version_folder() {
         Engine::Chromium
+    } else if dir.join("WebView2Loader.dll").is_file() || mentions_webview2(exe) {
+        Engine::WebView2
     } else {
         Engine::Other
     }
+}
+
+/// True if the exe links the WebView2 loader (Tauri and others build it in).
+fn mentions_webview2(exe: &Path) -> bool {
+    const NEEDLE: &[u8] = b"CreateCoreWebView2Environment";
+    match std::fs::metadata(exe) {
+        Ok(m) if m.len() <= 300 * 1024 * 1024 => {}
+        _ => return false,
+    }
+    std::fs::read(exe)
+        .map(|data| data.windows(NEEDLE.len()).any(|w| w == NEEDLE))
+        .unwrap_or(false)
 }
 
 /// Arguments that make a program skip its own sandbox, put before its
@@ -60,12 +77,44 @@ pub fn own_sandbox_off_args(exe: &Path) -> Vec<String> {
     match engine(exe) {
         Engine::Chromium => vec!["--no-sandbox".into()],
         Engine::Steam => vec!["-no-cef-sandbox".into()],
-        Engine::Other => Vec::new(),
+        Engine::WebView2 | Engine::Other => Vec::new(),
     }
+}
+
+/// True if an installer's file name follows the naming of Tauri
+/// (`App_1.2.3_x64-setup.exe`) or electron-builder (`App Setup 1.2.3.exe`)
+/// installers, whose apps need the compatible tier.
+pub fn installer_looks_web(file_name: &str) -> bool {
+    let n = file_name.to_ascii_lowercase();
+    let version = |v: &str| !v.is_empty() && v.contains('.') && v.chars().all(|c| c.is_ascii_digit() || c == '.');
+    for arch in ["_x64-setup.exe", "_x86-setup.exe", "_arm64-setup.exe"] {
+        if let Some(rest) = n.strip_suffix(arch) {
+            if let Some((_, v)) = rest.rsplit_once('_') {
+                return version(v);
+            }
+        }
+    }
+    if let Some(rest) = n.strip_suffix(".exe") {
+        if let Some((_, v)) = rest.rsplit_once(" setup ") {
+            return version(v);
+        }
+    }
+    false
 }
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn web_installer_names() {
+        use super::installer_looks_web as w;
+        assert!(w("Kryoto-Desktop_0.4.0_x64-setup.exe"));
+        assert!(w("pot_3.0.7_x64-setup.exe"));
+        assert!(w("Some App Setup 1.2.3.exe"));
+        assert!(!w("7z2408-x64.exe"));
+        assert!(!w("setup.exe"));
+        assert!(!w("npp.8.6.Installer.x64.exe"));
+    }
+
     use super::*;
 
     #[test]
@@ -75,6 +124,10 @@ mod tests {
         let exe = d.join("AiChat.exe");
         std::fs::write(&exe, b"MZ").unwrap();
         assert_eq!(engine(&exe), Engine::Other);
+        let tauri = d.join("tauri-app.exe");
+        std::fs::write(&tauri, b"MZ...CreateCoreWebView2Environment...").unwrap();
+        assert_eq!(engine(&tauri), Engine::WebView2);
+        std::fs::remove_file(&tauri).unwrap();
         std::fs::create_dir_all(d.join("131.0.2903.70")).unwrap();
         std::fs::write(d.join("131.0.2903.70").join("msedge_elf.dll"), b"").unwrap();
         assert_eq!(engine(&exe), Engine::Chromium);
