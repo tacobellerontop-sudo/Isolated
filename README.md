@@ -191,6 +191,20 @@ gives them their own `HOME` and AppData.
   Isolated warns you.
 - Games whose anti-cheat installs a kernel driver can't run in any sandbox.
 
+**Hiding your files from "Works with more apps" containers.** Apps in these
+containers can't change your files, but Windows lets them read most of them
+(they can tell, for example, where Steam is installed). In **Settings**, turn
+on **Hide your files from "Works with more apps" containers** (or run
+`isolated sandbox-user setup`). Isolated then creates a hidden standard
+Windows user, `IsolatedSandbox`, and runs these containers' apps as that user,
+still at low integrity. Windows itself keeps that user out of your user folder
+(Documents, Desktop, Downloads, AppData) and your settings. It can still see
+programs installed for everyone, such as those in Program Files, and other
+drives whose permissions let every user in. Creating the user needs
+administrator rights once. Its password is random and kept encrypted for your
+Windows account only. **Turn off** (or `isolated sandbox-user remove`) deletes
+the user and its folder.
+
 **Choosing folders.** **Run in Isolated with folders...** opens a small
 window before the app starts: add the folders it may see (or drop them on
 the window), and tick **Can change files** for the ones it may save into.
@@ -228,6 +242,7 @@ isolated container net "AI apps" off
 isolated ps
 isolated kill <id>
 isolated system-compat
+isolated sandbox-user setup
 isolated update
 ```
 

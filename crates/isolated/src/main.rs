@@ -64,6 +64,10 @@ Usage:
   isolated repair                       Remove folder access left by interrupted sandboxes
   isolated system-compat                As administrator, once: let Node, Electron and
                                         similar apps start in a sandbox
+  isolated sandbox-user setup|remove|status
+                                        Run "Works with more apps" containers as a hidden
+                                        Windows user that can't read your files (asks
+                                        for administrator rights once)
   isolated --version
 
 'container' works everywhere 'box' does: a box is what the window calls a
