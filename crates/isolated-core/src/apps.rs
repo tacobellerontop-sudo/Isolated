@@ -38,7 +38,16 @@ pub fn engine(exe: &Path) -> Engine {
         return Engine::Other;
     };
     let has = |p: &Path| CHROMIUM_MARKERS.iter().any(|m| p.join(m).is_file());
-    if has(dir) || dir.join(r"resources\app.asar").is_file() {
+    // Chrome and Edge keep these in a folder named after their version.
+    let in_version_folder = || {
+        std::fs::read_dir(dir).into_iter().flatten().flatten().any(|e| {
+            let n = e.file_name().to_string_lossy().into_owned();
+            n.contains('.')
+                && n.chars().all(|c| c.is_ascii_digit() || c == '.')
+                && (has(&e.path()) || e.path().join("msedge_elf.dll").is_file())
+        })
+    };
+    if has(dir) || dir.join("resources").join("app.asar").is_file() || in_version_folder() {
         Engine::Chromium
     } else {
         Engine::Other
@@ -66,11 +75,12 @@ mod tests {
         let exe = d.join("AiChat.exe");
         std::fs::write(&exe, b"MZ").unwrap();
         assert_eq!(engine(&exe), Engine::Other);
-        std::fs::write(d.join(r"resources").join("app.asar"), b"").unwrap();
-        if cfg!(windows) {
-            assert_eq!(engine(&exe), Engine::Chromium);
-        }
-        std::fs::write(d.join("resources.pak"), b"").unwrap();
+        std::fs::create_dir_all(d.join("131.0.2903.70")).unwrap();
+        std::fs::write(d.join("131.0.2903.70").join("msedge_elf.dll"), b"").unwrap();
+        assert_eq!(engine(&exe), Engine::Chromium);
+        std::fs::remove_dir_all(d.join("131.0.2903.70")).unwrap();
+        assert_eq!(engine(&exe), Engine::Other);
+        std::fs::write(d.join("resources").join("app.asar"), b"").unwrap();
         assert_eq!(engine(&exe), Engine::Chromium);
         assert_eq!(own_sandbox_off_args(&exe), vec!["--no-sandbox".to_string()]);
         assert_eq!(engine(&d.join("Steam.exe")), Engine::Steam);

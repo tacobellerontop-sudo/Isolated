@@ -522,6 +522,13 @@ fs.writeFileSync(path.join(__dirname, 'node-low.txt'), String(r.stdout || r.erro
     $t = Get-Content "$low\node-low.txt" -ErrorAction SilentlyContinue
     Write-Host "INFO  Node with a child process in the compatible tier: exit $code, $t"
 }
+# Without --no-sandbox: Isolated should spot Chrome and Edge and add it.
+foreach ($browser in @("${env:ProgramFiles(x86)}\Microsoft\Edge\Application\msedge.exe", "$env:ProgramFiles\Google\Chrome\Application\chrome.exe")) {
+    if (-not (Test-Path $browser)) { continue }
+    Remove-Item "$low\shot.png" -ErrorAction SilentlyContinue
+    $code = Run-Timed @("run", "--compatible", "--accept-weaker", "--no-ask", "--", $browser, "--headless=new", "--disable-gpu", "--screenshot=$low\shot.png", "--window-size=800,600", "https://example.com") 90
+    Check "$(Split-Path $browser -Leaf) runs in the compatible tier (exit $code)" (Test-Path "$low\shot.png")
+}
 foreach ($v in $variants) {
     $browser, $extra, $pre = $v
     if (-not (Test-Path $browser) -or $pre) { continue }
@@ -556,31 +563,6 @@ if ((Test-Path $ez) -and ((Get-Item $ez).Length -gt 50MB)) {
         $code = Run-Timed @("box", "run", "--accept-weaker", "SmokeLow", $le, "$aiHome\eapp", "$low\electron-box.txt") 120
         $res = Get-Content "$low\electron-box.txt" -ErrorAction SilentlyContinue
         Write-Host "INFO  Electron in a compatible box: exit $code, result: $res"
-        if ($python) {
-            Set-Content -Path "$low\erun.py" -Value @"
-import subprocess, os, sys
-out = []
-for name, extra in (('plain', []), ('no-sandbox', ['--no-sandbox']), ('user-data-dir', ['--no-sandbox', r'--user-data-dir=$low\ud'])):
-    target = r'$low\e-' + name + '.txt'
-    e = dict(os.environ, ELECTRON_ENABLE_LOGGING='1', ELECTRON_ENABLE_STACK_DUMPING='1')
-    try:
-        r = subprocess.run([r'$le'] + extra + [r'$aiHome\eapp', target], capture_output=True, timeout=45, env=e)
-        code = hex(r.returncode & 0xffffffff); text = (r.stdout + r.stderr).decode('utf-8', 'replace')
-    except subprocess.TimeoutExpired as t:
-        code = 'timeout'; text = ((t.stdout or b'') + (t.stderr or b'')).decode('utf-8', 'replace')
-    res = open(target).read() if os.path.exists(target) else ''
-    out.append(name + ': exit ' + code + ', result: ' + res)
-    out.extend('      ' + l[:200] for l in [l for l in text.splitlines() if l.strip()][-12:])
-    open(r'$low\erun.txt', 'w').write('\n'.join(out))
-"@
-            $code = Run-Timed @("box", "run", "--accept-weaker", "SmokeLow", $python, "$low\erun.py") 200
-            Remove-Item "$low\e-base.txt" -ErrorAction SilentlyContinue
-            $bp = Start-Process -FilePath $le -ArgumentList @("$aiHome\eapp", "$low\e-base.txt") -PassThru -WindowStyle Hidden
-            if (-not $bp.WaitForExit(45000)) { $bp.Kill() }
-            Write-Host "INFO  Electron outside any sandbox: $(Get-Content "$low\e-base.txt" -ErrorAction SilentlyContinue)"
-            Write-Host "Electron started by Python in a compatible box (exit $code):"
-            Get-Content "$low\erun.txt" -ErrorAction SilentlyContinue | ForEach-Object { Write-Host "    $_" }
-        }
     }
     Run-Sandboxed @("box", "delete", "SmokeLow") | Out-Null
 }
