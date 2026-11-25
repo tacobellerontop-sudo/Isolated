@@ -555,49 +555,6 @@ fn folder(mut parser: lexopt::Parser, dirs: &Dirs, out: &Out) -> Result<ExitCode
             }
             Ok(ExitCode::SUCCESS)
         }
-        "keep" => {
-            // isolated box keep <box> [--remove] [<folder>]
-            let mut remove = false;
-            let mut values: Vec<String> = Vec::new();
-            while let Some(arg) = parser.next().map_err(|e| e.to_string())? {
-                match arg {
-                    Long("remove") => remove = true,
-                    Value(v) => values.push(os_string(v)?),
-                    other => return Err(format!("{}. Try 'isolated --help'.", other.unexpected())),
-                }
-            }
-            let box_name = values.first().ok_or("expected a box name")?;
-            let mut b = load_box(dirs, box_name)?;
-            let Some(folder) = values.get(1) else {
-                if b.kept_folders.is_empty() {
-                    out.info(&format!("Box {} keeps no folders from your PC.", b.name));
-                }
-                for k in &b.kept_folders {
-                    out.info(k);
-                }
-                return Ok(ExitCode::SUCCESS);
-            };
-            let stored = isolated_core::boxes::store_kept_path(folder);
-            if remove {
-                isolated_windows::boxes::release_folders(&b);
-                b.kept_folders.retain(|k| !k.eq_ignore_ascii_case(&stored));
-                b.save(dirs)?;
-                out.info(&format!(
-                    "Box {} no longer keeps {stored}. Its copy stays in the box.",
-                    b.name
-                ));
-            } else {
-                if !b.kept_folders.iter().any(|k| k.eq_ignore_ascii_case(&stored)) {
-                    b.kept_folders.push(stored.clone());
-                }
-                b.save(dirs)?;
-                out.info(&format!(
-                    "Box {} now keeps {stored}: apps in it that write there write into the box.",
-                    b.name
-                ));
-            }
-            Ok(ExitCode::SUCCESS)
-        }
         "add" => {
             let mut path = None;
             let mut net = false;
@@ -1076,6 +1033,49 @@ fn app_box(mut parser: lexopt::Parser, dirs: &Dirs, out: &Out) -> Result<ExitCod
             let b = load_box(dirs, &box_name)?;
             isolated_windows::boxes::remove(dirs, &b.name)?;
             out.info(&format!("Deleted box {}.", b.name));
+            Ok(ExitCode::SUCCESS)
+        }
+        "keep" => {
+            // isolated box keep <box> [--remove] [<folder>]
+            let mut remove = false;
+            let mut values: Vec<String> = Vec::new();
+            while let Some(arg) = parser.next().map_err(|e| e.to_string())? {
+                match arg {
+                    Long("remove") => remove = true,
+                    Value(v) => values.push(os_string(v)?),
+                    other => return Err(format!("{}. Try 'isolated --help'.", other.unexpected())),
+                }
+            }
+            let box_name = values.first().ok_or("expected a box name")?;
+            let mut b = load_box(dirs, box_name)?;
+            let Some(folder) = values.get(1) else {
+                if b.kept_folders.is_empty() {
+                    out.info(&format!("Box {} keeps no folders from your PC.", b.name));
+                }
+                for k in &b.kept_folders {
+                    out.info(k);
+                }
+                return Ok(ExitCode::SUCCESS);
+            };
+            let stored = isolated_core::boxes::store_kept_path(folder);
+            if remove {
+                isolated_windows::boxes::release_folders(&b);
+                b.kept_folders.retain(|k| !k.eq_ignore_ascii_case(&stored));
+                b.save(dirs)?;
+                out.info(&format!(
+                    "Box {} no longer keeps {stored}. Its copy stays in the box.",
+                    b.name
+                ));
+            } else {
+                if !b.kept_folders.iter().any(|k| k.eq_ignore_ascii_case(&stored)) {
+                    b.kept_folders.push(stored.clone());
+                }
+                b.save(dirs)?;
+                out.info(&format!(
+                    "Box {} now keeps {stored}: apps in it that write there write into the box.",
+                    b.name
+                ));
+            }
             Ok(ExitCode::SUCCESS)
         }
         other => Err(format!("unknown box command '{other}'")),
