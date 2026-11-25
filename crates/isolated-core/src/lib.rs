@@ -4,6 +4,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod apps;
 pub mod boxes;
 pub mod bundle;
 pub mod cabinet;

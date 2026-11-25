@@ -462,6 +462,10 @@ fn build_env(
             set("HOMEPATH", home[2..].to_string(), &mut env);
         }
     }
+    if !appcontainer && !installer {
+        // WebView2 apps (Tauri and others) start Edge's engine themselves.
+        set("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS", "--no-sandbox".into(), &mut env);
+    }
     if let Some(p) = temp {
         set("TEMP", p.to_string_lossy().into(), &mut env);
         set("TMP", p.to_string_lossy().into(), &mut env);
@@ -638,6 +642,14 @@ pub fn launch(dirs: &Dirs, policy: &Policy, req: &LaunchRequest) -> Result<Runni
     }
 
     let mut prepared = prepare(&req.target, &req.args, 0, req.installer)?;
+    if policy.tier == Tier::Compatible && !req.installer && prepared.application.as_ref() == Some(&prepared.program) {
+        // Chromium's own sandbox can't start under a low-integrity token.
+        let mut args = isolated_core::apps::own_sandbox_off_args(&prepared.program);
+        if !args.is_empty() && !req.args.iter().any(|a| args.contains(a)) {
+            args.extend(req.args.iter().cloned());
+            prepared = prepare(&req.target, &args, 0, req.installer)?;
+        }
+    }
     if !req.raw_tail.is_empty() {
         prepared.command_line.push(' ');
         prepared.command_line.push_str(&req.raw_tail);

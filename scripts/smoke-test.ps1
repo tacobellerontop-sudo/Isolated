@@ -543,6 +543,23 @@ if ($m.Success) {
         Get-Content "$low\e-log.txt" -ErrorAction SilentlyContinue | Select-Object -Last 15 | ForEach-Object { Write-Host "    $_" }
     }
 }
+# Electron in a compatible box, the way users would run an AI desktop app:
+# Isolated tells Chromium-based apps to skip their own sandbox there.
+if ((Test-Path $ez) -and ((Get-Item $ez).Length -gt 50MB)) {
+    $code = Run-Timed @("box", "install", "--profile", "compatible", "--accept-weaker", "--box", "SmokeLow", "--", $ez) 300
+    $lowText = (Get-Content (Join-Path $boxesDir "SmokeLow.toml") -Raw -ErrorAction SilentlyContinue)
+    $m3 = [regex]::Match("$lowText", 'path = ["'']([^"'']*\\electron\.exe)["'']')
+    Write-Host "Electron in a compatible box (exit $code): $($m3.Groups[1].Value)"
+    if ($m3.Success) {
+        $le = $m3.Groups[1].Value -replace '\\\\', '\'
+        Remove-Item "$low\electron-box.txt", "$low\e-box.log" -ErrorAction SilentlyContinue
+        $code = Run-Timed @("box", "run", "--accept-weaker", "SmokeLow", $le, "--enable-logging=file", "--log-file=$low\e-box.log", "$aiHome\eapp", "$low\electron-box.txt") 120
+        $res = Get-Content "$low\electron-box.txt" -ErrorAction SilentlyContinue
+        Write-Host "INFO  Electron in a compatible box: exit $code, result: $res"
+        Get-Content "$low\e-box.log" -ErrorAction SilentlyContinue | Where-Object { $_ -match "ERROR|FATAL|denied" } | Select-Object -Last 15 | ForEach-Object { Write-Host "    $_" }
+    }
+    Run-Sandboxed @("box", "delete", "SmokeLow") | Out-Null
+}
 Run-Sandboxed @("box", "delete", "SmokeAI") | Out-Null
 
 # 8. Right-click menu registers and unregisters.
