@@ -597,6 +597,12 @@ if ($tauri -and (Test-Path $tauri)) {
     }
 }
 
+# 21. No program started by the tests above was flagged as leaving its
+#     sandbox (the warning is meant for approved administrator prompts).
+$escLog = Join-Path $env:LOCALAPPDATA "Isolated\escapes.log"
+if (Test-Path $escLog) { Get-Content $escLog | ForEach-Object { Write-Host "    $_" } }
+Check "no false warnings about programs leaving a sandbox" (-not (Test-Path $escLog))
+
 # 8. Right-click menu registers and unregisters.
 & $Exe register | Out-Null
 Start-Sleep -Milliseconds 500

@@ -4,6 +4,7 @@
 pub mod acl;
 pub mod appcontainer;
 pub mod drive;
+pub mod escape;
 pub mod http;
 pub mod install;
 pub mod job;
