@@ -10,8 +10,9 @@ use windows::Win32::System::Com::{
 };
 use windows::Win32::UI::Shell::Common::COMDLG_FILTERSPEC;
 use windows::Win32::UI::Shell::{
-    FOLDERID_Desktop, FOLDERID_Documents, FOLDERID_Downloads, FOLDERID_LocalAppData, FOLDERID_LocalAppDataLow,
-    FOLDERID_Profile, FOLDERID_Programs, FOLDERID_RoamingAppData, FileOpenDialog, IFileOpenDialog, IShellLinkW,
+    FOLDERID_CommonPrograms, FOLDERID_Desktop, FOLDERID_Documents, FOLDERID_Downloads, FOLDERID_LocalAppData,
+    FOLDERID_LocalAppDataLow, FOLDERID_Profile, FOLDERID_ProgramData, FOLDERID_ProgramFiles, FOLDERID_Programs,
+    FOLDERID_PublicDesktop, FOLDERID_RoamingAppData, FileOpenDialog, IFileOpenDialog, IShellLinkW,
     SHGetKnownFolderPath, ShellExecuteW, ShellLink, FOS_FORCEFILESYSTEM, FOS_PICKFOLDERS, KF_FLAG_DEFAULT,
     KF_FLAG_DONT_VERIFY, KF_FLAG_NO_ALIAS, KNOWN_FOLDER_FLAG, SIGDN_FILESYSPATH, SLR_NO_UI,
 };
@@ -68,6 +69,24 @@ pub fn open(target: &str) {
     }
 }
 
+/// Starts `exe` as administrator (Windows asks first). False if refused.
+pub fn run_as_admin(exe: &std::path::Path, args: &str) -> bool {
+    let t = Wide::new(exe.as_os_str());
+    let a = Wide::new(args);
+    let verb = Wide::new("runas");
+    let r = unsafe {
+        ShellExecuteW(
+            None,
+            verb.pcwstr(),
+            t.pcwstr(),
+            a.pcwstr(),
+            PCWSTR::null(),
+            SW_SHOWNORMAL,
+        )
+    };
+    r.0 as isize > 32
+}
+
 pub fn pick(folder: bool) -> Option<PathBuf> {
     pick_with(folder, "Programs and scripts", "*.exe;*.lnk;*.bat;*.cmd;*.ps1;*.com")
 }
@@ -77,7 +96,7 @@ pub fn pick_any() -> Option<PathBuf> {
 }
 
 pub fn pick_installer() -> Option<PathBuf> {
-    pick_with(false, "Installers", "*.exe;*.msi")
+    pick_with(false, "Installers and portable apps", "*.exe;*.msi;*.zip")
 }
 
 fn pick_with(folder: bool, kind: &str, pattern: &str) -> Option<PathBuf> {
@@ -125,6 +144,10 @@ pub enum KnownFolder {
     RoamingAppData,
     LocalAppData,
     StartMenuPrograms,
+    ProgramData,
+    CommonPrograms,
+    PublicDesktop,
+    ProgramFiles,
 }
 
 fn folder_id(f: KnownFolder) -> &'static GUID {
@@ -137,6 +160,10 @@ fn folder_id(f: KnownFolder) -> &'static GUID {
         KnownFolder::RoamingAppData => &FOLDERID_RoamingAppData,
         KnownFolder::LocalAppData => &FOLDERID_LocalAppData,
         KnownFolder::StartMenuPrograms => &FOLDERID_Programs,
+        KnownFolder::ProgramData => &FOLDERID_ProgramData,
+        KnownFolder::CommonPrograms => &FOLDERID_CommonPrograms,
+        KnownFolder::PublicDesktop => &FOLDERID_PublicDesktop,
+        KnownFolder::ProgramFiles => &FOLDERID_ProgramFiles,
     }
 }
 

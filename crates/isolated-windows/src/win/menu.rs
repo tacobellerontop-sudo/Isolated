@@ -18,6 +18,8 @@ pub const CLASSES: &[&str] = &[
     "cmdfile",
     "Microsoft.PowerShellScript.1",
     "Msi.Package",
+    // Portable apps shipped as .zip files, whatever program opens them.
+    r"SystemFileAssociations\.zip",
 ];
 const VERB: &str = "Isolated";
 
@@ -169,11 +171,11 @@ pub fn register(exe: &Path) -> Result<(), String> {
         // Installers: .msi files only get the install entry; programs get it
         // after the run entries.
         let list: Vec<&(&str, &str, String)> = match *class {
-            "Msi.Package" => vec![&install],
+            "Msi.Package" | r"SystemFileAssociations\.zip" => vec![&install],
             "exefile" => entries.iter().chain(std::iter::once(&install)).collect(),
             _ => entries.iter().collect(),
         };
-        if *class == "Msi.Package" {
+        if *class != "exefile" && list.len() == 1 {
             set_string(&k, Some("MUIVerb"), "Install in Isolated")?;
         }
         for (sub, label, command) in list {

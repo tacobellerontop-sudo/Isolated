@@ -197,6 +197,9 @@ struct App {
     /// Folder whose card was opened from the right-click menu.
     focus_folder: Option<String>,
     confirm_unisolate: Option<String>,
+    /// Whether drive roots still block Node and Electron, and when that was
+    /// last checked.
+    compat: Option<(bool, Instant)>,
 }
 
 impl App {
@@ -231,6 +234,7 @@ impl App {
             folder_programs: Default::default(),
             focus_folder: None,
             confirm_unisolate: None,
+            compat: None,
             dirs,
         };
         app.reload_boxes();
@@ -558,7 +562,7 @@ impl App {
         let is_msi = path
             .extension()
             .and_then(|e| e.to_str())
-            .is_some_and(|e| e.eq_ignore_ascii_case("msi"));
+            .is_some_and(|e| e.eq_ignore_ascii_case("msi") || e.eq_ignore_ascii_case("zip"));
         if self.view == View::Installed || is_msi {
             self.open_install_form(&path.to_string_lossy(), None);
         } else {
@@ -595,7 +599,7 @@ impl App {
             if Path::new(&installer).is_file() {
                 Ok(())
             } else {
-                Err("Choose an installer file (.exe or .msi).".to_string())
+                Err("Choose an installer (.exe or .msi) or a portable app (.zip).".to_string())
             }
         });
         if let Err(e) = checked {
@@ -1986,6 +1990,28 @@ impl App {
             });
         if before != self.settings.default_profile {
             let _ = self.settings.save(&self.dirs);
+        }
+
+        if self.compat.is_none_or(|(_, t)| t.elapsed() > Duration::from_secs(5)) {
+            self.compat = Some((isolated_windows::compat::system_needed(), Instant::now()));
+        }
+        if self.compat.is_some_and(|(needed, _)| needed) {
+            ui.add_space(12.0);
+            ui.label(RichText::new("App compatibility").strong());
+            ui.label(
+                "Node, Electron and many AI and game apps can't start in a sandbox until Windows lets \
+                 sandboxes see that drives like C:\\ exist. This shows them only that each drive and the \
+                 Users folder are folders, never what's inside. It needs administrator approval once.",
+            );
+            if ui.button("Allow (needs administrator)").clicked() {
+                let exe = std::env::current_exe().unwrap_or_default();
+                if shell::run_as_admin(&exe, "system-compat") {
+                    self.set_status("Approved. Apps like Node and Electron can start now.", false);
+                } else {
+                    self.set_status("Windows didn't allow it, so nothing changed.", true);
+                }
+                self.compat = Some((true, Instant::now()));
+            }
         }
 
         ui.add_space(12.0);

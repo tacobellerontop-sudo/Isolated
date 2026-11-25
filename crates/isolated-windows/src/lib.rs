@@ -290,6 +290,130 @@ pub mod boxes {
         v
     }
 
+    /// Copies `.msi` packages that appear in a box while an installer runs.
+    ///
+    /// Many setup programs only unpack a Windows Installer package and hand
+    /// it to the Windows Installer service, which a sandbox cannot reach, so
+    /// they fail and often delete the package again. Capture tools such as
+    /// Cameyo and Turbo record what an installer lays down; Isolated keeps a
+    /// copy of each package (and the `.cab` files beside it) as it appears,
+    /// so it can unpack it itself afterwards.
+    pub struct MsiCatcher {
+        stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+        thread: Option<std::thread::JoinHandle<Vec<PathBuf>>>,
+    }
+
+    impl MsiCatcher {
+        /// Watches `box_folder` and copies packages into `keep`.
+        pub fn start(box_folder: &Path, keep: &Path) -> MsiCatcher {
+            let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let (folder, keep, flag) = (box_folder.to_path_buf(), keep.to_path_buf(), stop.clone());
+            let thread = std::thread::spawn(move || {
+                let mut seen: std::collections::HashMap<PathBuf, (u64, Option<std::time::SystemTime>, PathBuf)> =
+                    std::collections::HashMap::new();
+                loop {
+                    let last = flag.load(std::sync::atomic::Ordering::Relaxed);
+                    catch_once(&folder, &keep, &mut seen);
+                    if last {
+                        break;
+                    }
+                    for _ in 0..7 {
+                        if flag.load(std::sync::atomic::Ordering::Relaxed) {
+                            break;
+                        }
+                        std::thread::sleep(std::time::Duration::from_millis(100));
+                    }
+                }
+                let mut out: Vec<PathBuf> = seen.into_values().map(|(_, _, d)| d).filter(|d| is_msi(d)).collect();
+                out.sort();
+                out
+            });
+            MsiCatcher {
+                stop,
+                thread: Some(thread),
+            }
+        }
+
+        /// Stops watching (after one last look) and returns the copies.
+        pub fn finish(mut self) -> Vec<PathBuf> {
+            self.stop.store(true, std::sync::atomic::Ordering::Relaxed);
+            self.thread.take().and_then(|t| t.join().ok()).unwrap_or_default()
+        }
+    }
+
+    impl Drop for MsiCatcher {
+        fn drop(&mut self) {
+            self.stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+
+    fn is_msi(p: &Path) -> bool {
+        use std::io::Read;
+        let mut head = [0u8; 8];
+        std::fs::File::open(p)
+            .and_then(|mut f| f.read_exact(&mut head))
+            .is_ok_and(|_| head == [0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1])
+    }
+
+    fn catch_once(
+        folder: &Path,
+        keep: &Path,
+        seen: &mut std::collections::HashMap<PathBuf, (u64, Option<std::time::SystemTime>, PathBuf)>,
+    ) {
+        let mut found = Vec::new();
+        find_packages(folder, keep, 0, &mut found);
+        for p in found {
+            let Ok(meta) = std::fs::metadata(&p) else { continue };
+            let stamp = (meta.len(), meta.modified().ok());
+            let dest = match seen.get(&p) {
+                Some((len, time, _)) if (*len, *time) == stamp => continue,
+                Some((_, _, d)) => d.clone(),
+                None => {
+                    let slot = keep.join(format!("{}", seen.len() + 1));
+                    slot.join(p.file_name().unwrap_or_default())
+                }
+            };
+            let Some(slot) = dest.parent() else { continue };
+            if std::fs::create_dir_all(slot).is_err() || std::fs::copy(&p, &dest).is_err() {
+                continue;
+            }
+            // Packages may keep their files in cabinets beside them.
+            if dest.extension().is_some_and(|e| e.eq_ignore_ascii_case("msi")) {
+                if let Some(Ok(rd)) = p.parent().map(std::fs::read_dir) {
+                    for e in rd.flatten() {
+                        let c = e.path();
+                        if c.extension().is_some_and(|x| x.eq_ignore_ascii_case("cab")) {
+                            let _ = std::fs::copy(&c, slot.join(e.file_name()));
+                        }
+                    }
+                }
+            }
+            seen.insert(p, (stamp.0, stamp.1, dest));
+        }
+    }
+
+    fn find_packages(dir: &Path, keep: &Path, depth: usize, out: &mut Vec<PathBuf>) {
+        if depth > 10 || out.len() > 64 {
+            return;
+        }
+        let Ok(rd) = std::fs::read_dir(dir) else { return };
+        for e in rd.flatten() {
+            let Ok(ft) = e.file_type() else { continue };
+            let p = e.path();
+            if ft.is_dir() {
+                // Installed programs are large and never hold the package
+                // being installed.
+                let name = e.file_name().to_string_lossy().to_ascii_lowercase();
+                if name == "programs" || p == keep {
+                    continue;
+                }
+                find_packages(&p, keep, depth + 1, out);
+            } else if ft.is_file() && p.extension().is_some_and(|x| x.eq_ignore_ascii_case("msi")) {
+                out.push(p);
+            }
+        }
+    }
+
     /// Programs and shortcuts in a box, to compare before and after an install.
     pub fn snapshot(folder: &Path) -> BTreeSet<String> {
         list(folder)
@@ -395,6 +519,94 @@ pub fn repair(dirs: &isolated_core::Dirs) -> Result<usize> {
     {
         let _ = dirs;
         Ok(0)
+    }
+}
+
+/// Lets sandboxed apps read the attributes of the folders above the user
+/// folder (`C:\`, `C:\Users`, ...). Node, Electron and most other runtimes
+/// check every folder above a file when they find its real path, and fail
+/// without this. Only attributes such as "this is a folder" become visible,
+/// never names or contents, and nothing below each folder changes.
+pub mod compat {
+    use std::path::PathBuf;
+
+    /// Folders inside the user's own profile; changed without asking.
+    pub fn user_folders() -> Vec<PathBuf> {
+        let mut out = Vec::new();
+        if let Some(home) = std::env::var_os("USERPROFILE").map(PathBuf::from) {
+            out.push(home.join("AppData"));
+            out.push(home);
+        }
+        if let Some(local) = std::env::var_os("LOCALAPPDATA").map(PathBuf::from) {
+            let packages = local.join("Packages");
+            // Each container's own folder sits above the AC folder its apps
+            // live in, and Windows gives the container no access to it.
+            if let Ok(list) = std::fs::read_dir(&packages) {
+                out.extend(
+                    list.flatten()
+                        .filter(|e| {
+                            e.file_name()
+                                .to_string_lossy()
+                                .to_ascii_lowercase()
+                                .starts_with("isolated.")
+                        })
+                        .map(|e| e.path()),
+                );
+            }
+            out.push(packages);
+            out.push(local);
+        }
+        out.retain(|p| p.is_dir());
+        out
+    }
+
+    /// Folders that need an administrator: the drive roots and `C:\Users`.
+    pub fn system_folders() -> Vec<PathBuf> {
+        #[allow(unused_mut)]
+        let mut out: Vec<PathBuf> = Vec::new();
+        if let Some(users) = std::env::var_os("USERPROFILE")
+            .map(PathBuf::from)
+            .and_then(|h| h.parent().map(PathBuf::from))
+        {
+            out.push(users);
+        }
+        #[cfg(windows)]
+        out.extend(crate::win::drive::fixed_roots());
+        out
+    }
+
+    /// Fixes the user's own folders, quietly. Called before each launch.
+    pub fn prepare_user() {
+        #[cfg(windows)]
+        for p in user_folders() {
+            let _ = crate::win::acl::allow_attribute_read(&p, false);
+        }
+    }
+
+    /// True if some drive root or `C:\Users` still blocks Node and Electron.
+    pub fn system_needed() -> bool {
+        #[cfg(windows)]
+        return system_folders()
+            .iter()
+            .any(|p| crate::win::acl::allow_attribute_read(p, true).unwrap_or(false));
+        #[cfg(not(windows))]
+        false
+    }
+
+    /// Fixes the system folders. Needs to run as administrator. Returns how
+    /// many folders were changed.
+    pub fn fix_system() -> crate::Result<usize> {
+        #[allow(unused_mut)]
+        let mut n = 0;
+        #[cfg(windows)]
+        for p in system_folders() {
+            match crate::win::acl::allow_attribute_read(&p, false) {
+                Ok(true) => n += 1,
+                Ok(false) => {}
+                Err(e) => return Err(e),
+            }
+        }
+        Ok(n)
     }
 }
 
@@ -520,6 +732,18 @@ pub mod shell {
         }
     }
 
+    /// Starts `exe` as administrator; Windows asks users first. False if
+    /// they said no.
+    pub fn run_as_admin(exe: &std::path::Path, args: &str) -> bool {
+        #[cfg(windows)]
+        return crate::win::shell::run_as_admin(exe, args);
+        #[cfg(not(windows))]
+        {
+            let _ = (exe, args);
+            false
+        }
+    }
+
     /// Asks users to pick a program or script.
     pub fn pick_program() -> Option<PathBuf> {
         #[cfg(windows)]
@@ -566,6 +790,10 @@ pub mod shell {
                 ("LocalAppDataLow", known_folder(K::LocalAppDataLow)),
                 ("RoamingAppData", known_folder(K::RoamingAppData)),
                 ("LocalAppData", known_folder(K::LocalAppData)),
+                ("ProgramData", known_folder(K::ProgramData)),
+                ("CommonPrograms", known_folder(K::CommonPrograms)),
+                ("PublicDesktop", known_folder(K::PublicDesktop)),
+                ("ProgramFiles", known_folder(K::ProgramFiles)),
             ]
         }
         #[cfg(not(windows))]

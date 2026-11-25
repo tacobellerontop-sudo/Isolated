@@ -186,3 +186,99 @@ pub fn replay_journal(dirs: &Dirs) -> Result<usize, String> {
         _ => Ok(n),
     }
 }
+
+/// Lets every sandboxed app read the attributes (not the contents) of one
+/// folder, without touching anything inside it. Node, Electron and other
+/// runtimes look at each folder above a file when they resolve its real path,
+/// and an AppContainer can't even do that for `C:\` or the user folder.
+/// Windows grants the same right to Store apps on many system folders.
+/// Returns true if the folder was changed (or, with `check_only`, needs to be).
+///
+/// This uses SetFileSecurityW on purpose: SetNamedSecurityInfo would walk
+/// every file below the folder, which for `C:\` is the whole drive.
+pub fn allow_attribute_read(path: &Path, check_only: bool) -> Result<bool, String> {
+    use windows::Win32::Security::{
+        EqualSid, GetAce, GetSecurityDescriptorControl, InitializeSecurityDescriptor, SetFileSecurityW,
+        SetSecurityDescriptorControl, SetSecurityDescriptorDacl, ACCESS_ALLOWED_ACE, SECURITY_DESCRIPTOR,
+        SECURITY_DESCRIPTOR_CONTROL, SE_DACL_AUTO_INHERITED, SE_DACL_PROTECTED,
+    };
+    use windows::Win32::Storage::FileSystem::FILE_READ_ATTRIBUTES;
+    const ALLOWED: u8 = 0; // ACCESS_ALLOWED_ACE_TYPE
+    let packages = StringSid::parse("S-1-15-2-1")?;
+    let wpath = Wide::new(path.as_os_str());
+    unsafe {
+        let mut dacl: *mut ACL = std::ptr::null_mut();
+        let mut sd = PSECURITY_DESCRIPTOR::default();
+        let rc = GetNamedSecurityInfoW(
+            wpath.pcwstr(),
+            SE_FILE_OBJECT,
+            DACL_SECURITY_INFORMATION,
+            None,
+            None,
+            Some(&mut dacl),
+            None,
+            &mut sd,
+        );
+        if rc != ERROR_SUCCESS {
+            return Err(win32_err(
+                &format!("could not read permissions of {}", path.display()),
+                rc,
+            ));
+        }
+        let _sd = LocalBox(sd.0);
+        if dacl.is_null() {
+            return Ok(false); // no DACL: everyone already has full access
+        }
+        for i in 0..(*dacl).AceCount as u32 {
+            let mut ace: *mut core::ffi::c_void = std::ptr::null_mut();
+            if GetAce(dacl, i, &mut ace).is_err() {
+                continue;
+            }
+            let ace = ace as *const ACCESS_ALLOWED_ACE;
+            if (*ace).Header.AceType == ALLOWED
+                && (*ace).Mask & FILE_READ_ATTRIBUTES.0 != 0
+                && EqualSid(PSID(&(*ace).SidStart as *const u32 as *mut _), packages.0).is_ok()
+            {
+                return Ok(false);
+            }
+        }
+        if check_only {
+            return Ok(true);
+        }
+        let ea = EXPLICIT_ACCESS_W {
+            grfAccessPermissions: FILE_READ_ATTRIBUTES.0,
+            grfAccessMode: GRANT_ACCESS,
+            grfInheritance: NO_INHERITANCE,
+            Trustee: TRUSTEE_W {
+                pMultipleTrustee: std::ptr::null_mut(),
+                MultipleTrusteeOperation: NO_MULTIPLE_TRUSTEE,
+                TrusteeForm: TRUSTEE_IS_SID,
+                TrusteeType: TRUSTEE_IS_WELL_KNOWN_GROUP,
+                ptstrName: PWSTR(packages.0 .0 as *mut u16),
+            },
+        };
+        let mut new_dacl: *mut ACL = std::ptr::null_mut();
+        let rc = SetEntriesInAclW(Some(&[ea]), Some(dacl), &mut new_dacl);
+        if rc != ERROR_SUCCESS {
+            return Err(win32_err("could not build new permissions", rc));
+        }
+        let _new = LocalBox(new_dacl as *mut _);
+        let mut control = 0u16;
+        let mut revision = 0u32;
+        let _ = GetSecurityDescriptorControl(sd, &mut control, &mut revision);
+        let mut fresh = SECURITY_DESCRIPTOR::default();
+        let fresh_sd = PSECURITY_DESCRIPTOR(&mut fresh as *mut _ as *mut _);
+        InitializeSecurityDescriptor(fresh_sd, 1).map_err(|e| super::util::err("could not build permissions", e))?;
+        SetSecurityDescriptorDacl(fresh_sd, true, Some(new_dacl), false)
+            .map_err(|e| super::util::err("could not build permissions", e))?;
+        let keep = SECURITY_DESCRIPTOR_CONTROL(SE_DACL_PROTECTED.0 | SE_DACL_AUTO_INHERITED.0);
+        let _ = SetSecurityDescriptorControl(fresh_sd, keep, SECURITY_DESCRIPTOR_CONTROL(control & keep.0));
+        if !SetFileSecurityW(wpath.pcwstr(), DACL_SECURITY_INFORMATION, fresh_sd).as_bool() {
+            return Err(super::util::err(
+                &format!("could not change permissions of {}", path.display()),
+                windows::core::Error::from_thread(),
+            ));
+        }
+    }
+    Ok(true)
+}
