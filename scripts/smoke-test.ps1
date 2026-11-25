@@ -436,7 +436,8 @@ if ((Test-Path $ez) -and ((Get-Item $ez).Length -gt 50MB)) {
     Set-Content -Path "$aiHome\eapp\main.js" -Value @'
 const { app, BrowserWindow } = require('electron');
 const fs = require('fs'), path = require('path'), os = require('os');
-const out = (t) => fs.writeFileSync(path.join(os.homedir(), 'electron.txt'), t);
+const target = process.argv.find((a) => a.endsWith('.txt')) || path.join(os.homedir(), 'electron.txt');
+const out = (t) => fs.writeFileSync(target, t);
 setTimeout(() => { out('timeout'); app.exit(4); }, 60000);
 app.whenReady().then(async () => {
   const w = new BrowserWindow({ show: false });
@@ -542,6 +543,42 @@ if ($node -and $python) {
     Run-Timed @("box", "run", "SmokeAI", $python, "diag.py", "$aiHome\node.exe", $electronExe, "after-RA") 420 | Out-Null
     Get-Content "$aiHome\diag-after-RA.txt" -ErrorAction SilentlyContinue | ForEach-Object { Write-Host "    $_" }
     foreach ($d in $chain) { icacls $d /remove "*S-1-15-2-1" | Out-Null }
+}
+# The compatible tier (low integrity, no AppContainer) can create named
+# pipes, which Chromium, Electron and Node's child processes need.
+$low = Join-Path $env:USERPROFILE "AppData\LocalLow\IsolatedSmoke"
+New-Item -ItemType Directory -Force -Path $low | Out-Null
+icacls $low /setintegritylevel "(OI)(CI)low" | Out-Null
+if ($node) {
+    Set-Content -Path "$low\spawn.js" -Value @'
+const fs = require('fs'), path = require('path');
+const r = require('child_process').spawnSync(process.execPath, ['-e', 'console.log("child-ok")'], { encoding: 'utf8', timeout: 30000 });
+fs.writeFileSync(path.join(__dirname, 'node-low.txt'), String(r.stdout || r.error));
+'@
+    $code = Run-Timed @("run", "--compatible", "--accept-weaker", "--no-ask", "--", $node, "$low\spawn.js") 60
+    $t = Get-Content "$low\node-low.txt" -ErrorAction SilentlyContinue
+    Write-Host "INFO  Node with a child process in the compatible tier: exit $code, $t"
+}
+foreach ($v in $variants) {
+    $browser, $extra, $pre = $v
+    if (-not (Test-Path $browser) -or $pre) { continue }
+    Remove-Item "$low\shot.png" -ErrorAction SilentlyContinue
+    $args2 = @("run", "--compatible", "--accept-weaker", "--no-ask", "--", $browser, "--headless=new", "--disable-gpu", "--screenshot=$low\shot.png", "--window-size=800,600")
+    if ($extra) { $args2 += $extra -split " " }
+    $args2 += "https://example.com"
+    $code = Run-Timed $args2 90
+    Write-Host "INFO  Chromium ($(Split-Path $browser -Leaf) $extra) in the compatible tier: exit $code, screenshot $(Test-Path "$low\shot.png")"
+}
+if ($m.Success) {
+    $electron = $m.Groups[1].Value -replace '\\\\', '\'
+    foreach ($extra in @("", "--no-sandbox")) {
+        Remove-Item "$low\electron.txt" -ErrorAction SilentlyContinue
+        $args2 = @("run", "--compatible", "--accept-weaker", "--no-ask", "--", $electron)
+        if ($extra) { $args2 += $extra }
+        $args2 += @("$aiHome\eapp", "$low\electron.txt")
+        $code = Run-Timed $args2 90
+        Write-Host "INFO  Electron ($extra) in the compatible tier: exit $code, result: $(Get-Content "$low\electron.txt" -ErrorAction SilentlyContinue)"
+    }
 }
 Run-Sandboxed @("box", "delete", "SmokeAI") | Out-Null
 
