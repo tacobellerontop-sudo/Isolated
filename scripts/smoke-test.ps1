@@ -358,6 +358,10 @@ fetch('https://github.com').then(r => process.exit(r.ok ? 0 : 9), e => { fs.writ
 '@
     $code = Run-Timed @("box", "run", "SmokeAI", $node, "probe.js") 120
     Write-Host "node error: $(Get-Content "$aiHome\node-error.txt" -ErrorAction SilentlyContinue)"
+    if ("$code" -ne "0") {
+        Run-Timed @("box", "run", "SmokeAI", $cmd, "/d", "/c", "`"$node`" probe.js > node-out.txt 2>&1") 120 | Out-Null
+        Get-Content "$aiHome\node-out.txt" -ErrorAction SilentlyContinue | ForEach-Object { Write-Host "    node: $_" }
+    }
     Check "Node.js runs in a container, reaches the internet, keeps ~/.cache inside (exit $code)" (("$code" -eq "0") -and (Test-Path "$aiHome\.cache\probe\node.txt"))
 }
 $python = (Get-Command python -ErrorAction SilentlyContinue).Source
@@ -384,11 +388,12 @@ Check "programs in a container can talk over localhost ($loop)" (("$loop" -match
 foreach ($browser in @("${env:ProgramFiles(x86)}\Microsoft\Edge\Application\msedge.exe", "$env:ProgramFiles\Google\Chrome\Application\chrome.exe")) {
     if (-not (Test-Path $browser)) { continue }
     $name = Split-Path $browser -Leaf
-    foreach ($extra in @(@(), @("--no-sandbox"))) {
-        Remove-Item "$aiHome\shot.png" -ErrorAction SilentlyContinue
-        $bargs = @("box", "run", "SmokeAI", $browser, "--headless=new", "--disable-gpu", "--screenshot=shot.png", "--window-size=800,600") + $extra + @("https://example.com")
-        $code = Run-Timed $bargs 90
-        Write-Host "INFO  Chromium ($name $($extra -join ' ')) in a container: exit $code, screenshot $(Test-Path "$aiHome\shot.png")"
+    foreach ($extra in @("", "--no-sandbox")) {
+        Remove-Item "$aiHome\shot.png", "$aiHome\b-out.txt" -ErrorAction SilentlyContinue
+        $line = "`"$browser`" --headless=new --disable-gpu --enable-logging=stderr --v=0 --screenshot=shot.png --window-size=800,600 $extra https://example.com > b-out.txt 2>&1"
+        $code = Run-Timed @("box", "run", "SmokeAI", $cmd, "/d", "/c", $line) 90
+        Write-Host "INFO  Chromium ($name $extra) in a container: exit $code, screenshot $(Test-Path "$aiHome\shot.png")"
+        Get-Content "$aiHome\b-out.txt" -ErrorAction SilentlyContinue | Select-Object -First 25 | ForEach-Object { Write-Host "    $_" }
     }
 }
 Run-Sandboxed @("box", "delete", "SmokeAI") | Out-Null

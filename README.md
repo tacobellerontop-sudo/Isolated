@@ -44,7 +44,7 @@ entry is under **Show more options**. The submenu has:
 | Run in Isolated with folders... | Pick which of your folders the app can see, then run |
 | Run in Isolated with options... | Pick permissions in a small dialog first |
 | Edit Isolated profile... | Save permissions for this app |
-| Install in Isolated... | Install this app into a box (programs and `.msi` files) |
+| Install in Isolated... | Install this app into a box (programs, `.msi` and `.zip` files) |
 
 **Right-click a folder** (or the empty space inside one) and choose
 **Isolate this folder...** to make it an *isolated folder*: every program
@@ -110,10 +110,32 @@ so they still cannot see your files. Each box keeps its own files and
 settings; apps installed into the same box can see each other. Deleting a
 box removes everything installed in it.
 
-Installers that can install for one user work this way. Inno Setup
-installers are tested on every build; NSIS and Squirrel (Electron)
-installers are expected to work. Installers that must change Windows itself,
-such as drivers, services and system-wide runtimes, cannot run in a sandbox.
+Installers that can install for one user work this way. Isolated borrows
+tricks from other sandbox and app-virtualization tools to get more of them
+through:
+
+- It recognizes the common installer types (Inno Setup, NSIS including
+  Electron apps, WiX bundles, InstallShield, Advanced Installer, Squirrel)
+  and asks them to install for the current user, into the box.
+- Like Sandboxie and App-V, apps in a box get the box's own copy of the
+  folders shared by all users (ProgramData and Public), and installers get
+  the box's Programs folder as Program Files, so writes that would need
+  administrator rights land in the box instead of failing.
+- **Setup programs that wrap `.msi` packages** (WiX bundles, used by many
+  developer tools and runtimes) are not run: Isolated takes the packages out
+  and unpacks them like an `.msi` file (below).
+- **Setup programs that hand an `.msi` to Windows Installer** fail inside a
+  sandbox, because Windows Installer is a system service. Like capture tools
+  such as Cameyo and Turbo, Isolated keeps a copy of any package that appears
+  while the installer runs, and if the installer leaves no program behind,
+  it unpacks that package instead.
+- **Portable apps shipped as a `.zip`** can be installed too: right-click the
+  `.zip` and choose **Install in Isolated...**.
+
+If an installer still fails, the message says why when Isolated can tell
+(for example, that it insisted on administrator rights). Installers that
+must change Windows itself, such as drivers, services and system-wide
+runtimes, cannot run in a sandbox.
 
 **`.msi` files** are not run at all. Windows Installer is a system service
 that works outside any sandbox, so instead Isolated reads the package and
@@ -123,8 +145,9 @@ its Start menu shortcuts point to. No code from the package runs, so
 anything the installer would set up beyond its files (settings in the
 registry, services, file types, files for Windows system folders) is left
 out. Most apps that ship as an `.msi` only need their files; the 7-Zip
-`.msi` is tested on every build. Packages that keep their files outside the
-`.msi` are not supported yet.
+`.msi` and the WiX Toolset bundle are tested on every build. Packages that
+keep their files in `.cab` files next to them are supported when those files
+are there; packages split across several cabinets are not yet.
 
 **Choosing folders.** **Run in Isolated with folders...** opens a small
 window before the app starts: add the folders it may see (or drop them on
