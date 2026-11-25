@@ -274,7 +274,8 @@ Check "after folder remove the program can no longer change the folder (exit $co
 Remove-Item -Recurse -Force $isoDir -ErrorAction SilentlyContinue
 
 function Run-Timed([string[]]$IsolatedArgs, [int]$Seconds) {
-    $p = Start-Process -FilePath $Exe -ArgumentList $IsolatedArgs -PassThru -WindowStyle Hidden
+    $quoted = $IsolatedArgs | ForEach-Object { if ($_ -eq "" -or $_ -match '\s') { '"' + $_ + '"' } else { $_ } }
+    $p = Start-Process -FilePath $Exe -ArgumentList ($quoted -join " ") -PassThru -WindowStyle Hidden
     if ($p.WaitForExit($Seconds * 1000)) { return $p.ExitCode }
     $p.Kill()
     return "timeout"
