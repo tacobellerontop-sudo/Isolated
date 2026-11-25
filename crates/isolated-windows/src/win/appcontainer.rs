@@ -143,7 +143,22 @@ pub fn folder_container_name(folder_key: &str) -> String {
 
 /// Identity of an app box: fixed per box, so its folders persist across
 /// runs whatever program is started in it.
+///
+/// New boxes get a short name (`Isolated.b.<hash>`) for the same reason as
+/// isolated folders: the name appears twice in the LocalAppData paths apps
+/// install and save to, and long names pushed deep app folders (Electron
+/// and Squirrel apps) past Windows' 260-character limit. Boxes made before
+/// keep their longer name so their files stay where they are.
 pub fn box_container_name(box_name: &str) -> String {
+    let key = box_name.trim().to_lowercase();
+    let legacy = legacy_box_container_name(box_name);
+    if legacy_exists(&legacy) {
+        return legacy;
+    }
+    format!("Isolated.b.{:08x}", isolated_core::state::stable_hash(&key) as u32)
+}
+
+fn legacy_box_container_name(box_name: &str) -> String {
     let clean: String = box_name
         .trim()
         .chars()
@@ -155,6 +170,15 @@ pub fn box_container_name(box_name: &str) -> String {
         clean,
         isolated_core::state::stable_hash(&box_name.trim().to_lowercase()) as u32
     )
+}
+
+/// True if a box made before short names already has files under its
+/// old name (in either tier).
+fn legacy_exists(name: &str) -> bool {
+    let packages = std::env::var_os("LOCALAPPDATA").map(|l| std::path::PathBuf::from(l).join("Packages").join(name));
+    let compatible =
+        super::shell::known_folder(super::shell::KnownFolder::LocalAppDataLow).map(|l| l.join("Isolated").join(name));
+    packages.into_iter().chain(compatible).any(|p| p.exists())
 }
 
 /// Deletes an AppContainer profile and its storage folder.

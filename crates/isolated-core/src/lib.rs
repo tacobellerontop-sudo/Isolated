@@ -5,6 +5,7 @@
 #![forbid(unsafe_code)]
 
 pub mod boxes;
+pub mod bundle;
 pub mod cabinet;
 pub mod cmdline;
 pub mod msi;
@@ -13,6 +14,7 @@ pub mod profile;
 pub mod sha256;
 pub mod state;
 pub mod version;
+pub mod zip;
 
 pub use policy::{Clipboard, NetworkMode, Overrides, Policy, Tier};
 pub use profile::{ProfileStore, Source};

@@ -227,6 +227,54 @@ fn formatted_dir_path(target: &str, dirs: &mut Dirs) -> Option<PathBuf> {
     Some(p)
 }
 
+/// The processor a package is built for, from its summary (`x64`,
+/// `Intel`, `Arm64`), lowercased. Empty if unknown.
+pub fn arch(msi_path: &Path) -> String {
+    fs::File::open(msi_path)
+        .ok()
+        .and_then(|f| ::msi::Package::open(std::io::BufReader::new(f)).ok())
+        .and_then(|p| p.summary_info().arch().map(|a| a.to_ascii_lowercase()))
+        .unwrap_or_default()
+}
+
+/// Of several packages for different processors (a bundle often carries
+/// `app_x86.msi` and `app_x64.msi` and installs one), keeps the one that
+/// fits a 64-bit PC. Packages that have no 64-bit twin are all kept.
+pub fn pick_for_pc(packages: &[(PathBuf, String)]) -> Vec<PathBuf> {
+    fn family(p: &Path) -> String {
+        let stem = p
+            .file_stem()
+            .map(|s| s.to_string_lossy().to_ascii_lowercase())
+            .unwrap_or_default();
+        stem.split(|c: char| !c.is_ascii_alphanumeric())
+            .filter(|w| {
+                !matches!(
+                    *w,
+                    "x86" | "x64" | "amd64" | "arm64" | "win32" | "win64" | "32" | "64" | "ia32"
+                )
+            })
+            .map(|w| {
+                w.trim_end_matches("x64")
+                    .trim_end_matches("x86")
+                    .trim_end_matches("64")
+                    .trim_end_matches("32")
+            })
+            .collect::<Vec<_>>()
+            .join("-")
+    }
+    let is64 = |a: &str| a == "x64" || a == "amd64";
+    packages
+        .iter()
+        .filter(|(p, a)| {
+            is64(a)
+                || !packages
+                    .iter()
+                    .any(|(q, b)| q != p && is64(b) && family(q) == family(p))
+        })
+        .map(|(p, _)| p.clone())
+        .collect()
+}
+
 /// Unpacks `msi_path` into the box folders. Existing files are replaced.
 pub fn unpack(msi_path: &Path, box_root: &Path, folders: &BoxFolders) -> Result<Unpacked, String> {
     let file = fs::File::open(msi_path).map_err(|e| format!("{}: {e}", msi_path.display()))?;
@@ -302,25 +350,34 @@ pub fn unpack(msi_path: &Path, box_root: &Path, folders: &BoxFolders) -> Result<
         return Err("This installer has more files than Isolated allows.".into());
     }
 
-    // Embedded cabinets are streams named in the Media table with a `#`.
-    let mut cabinets: Vec<String> = Vec::new();
+    // Embedded cabinets are streams named in the Media table with a `#`;
+    // other names are `.cab` files next to the package.
+    let mut cabinets: Vec<(String, bool)> = Vec::new();
     let mut external = false;
+    let here = msi_path.parent().map(Path::to_path_buf).unwrap_or_default();
     for r in rows(&mut pkg, "Media") {
         let cab = text(&r, "Cabinet");
         if let Some(stream) = cab.strip_prefix('#') {
-            cabinets.push(stream.to_string());
+            cabinets.push((stream.to_string(), true));
         } else if !cab.is_empty() {
-            external = true;
+            match clean_name(&cab).map(|n| here.join(n)).filter(|p| p.is_file()) {
+                Some(p) => cabinets.push((p.to_string_lossy().into_owned(), false)),
+                None => external = true,
+            }
         }
     }
 
     let mut done: HashSet<String> = HashSet::new();
     let mut budget = MAX_TOTAL_BYTES;
-    for name in &cabinets {
+    for (name, embedded) in &cabinets {
         let mut data = Vec::new();
-        pkg.read_stream(name)
-            .and_then(|mut s| s.read_to_end(&mut data))
-            .map_err(|e| format!("Could not read the installer's files ({name}): {e}"))?;
+        if *embedded {
+            pkg.read_stream(name)
+                .and_then(|mut s| s.read_to_end(&mut data))
+                .map_err(|e| format!("Could not read the installer's files ({name}): {e}"))?;
+        } else {
+            data = fs::read(name).map_err(|e| format!("Could not read {name}: {e}"))?;
+        }
         let cab = Cabinet::parse(&data)?;
         let used = cab.extract(budget, |entry| {
             let Some(path) = dest.get(&entry.name) else {
@@ -343,14 +400,14 @@ pub fn unpack(msi_path: &Path, box_root: &Path, folders: &BoxFolders) -> Result<
     let missing = ordered.iter().filter(|(k, _)| !done.contains(k)).count();
     if out.files == 0 {
         return Err(if external || !ordered.is_empty() {
-            "This installer keeps its files outside the .msi (next to it, or in .cab files), which Isolated cannot unpack yet.".into()
+            "This installer keeps its files outside the .msi, and they are not next to it.".into()
         } else {
             "This installer does not contain any files Isolated can unpack.".into()
         });
     }
     if missing > 0 && external {
         return Err(format!(
-            "{missing} of this installer's files are kept outside the .msi, which Isolated cannot unpack yet."
+            "{missing} of this installer's files are kept outside the .msi and are not next to it."
         ));
     }
 
@@ -482,6 +539,21 @@ mod tests {
         for s in &u.shortcuts {
             assert!(Path::new(&s.target).is_file(), "{}", s.target);
         }
+    }
+
+    #[test]
+    fn picks_64_bit_twins() {
+        let v = |n: &str, a: &str| (PathBuf::from(n), a.to_string());
+        let got = pick_for_pc(&[
+            v("core.msi", "intel"),
+            v("tools64.msi", "x64"),
+            v("app_x86.msi", "intel"),
+            v("app_x64.msi", "x64"),
+            v("Driver.msi", "intel"),
+            v("Driver64.msi", "x64"),
+        ]);
+        let names: Vec<_> = got.iter().map(|p| p.to_string_lossy().into_owned()).collect();
+        assert_eq!(names, vec!["core.msi", "tools64.msi", "app_x64.msi", "Driver64.msi"]);
     }
 
     #[test]

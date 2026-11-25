@@ -369,20 +369,47 @@ pub fn choose_apps(shortcuts: &[FoundShortcut], exes: &[FoundExe]) -> Vec<BoxApp
 }
 
 /// Installer technology, guessed from the installer's bytes, so the right
-/// per-user switches can be passed.
+/// per-user switches can be passed and failures explained.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InstallerKind {
     Inno,
     Nsis,
+    /// A WiX "Burn" bundle: an .exe that installs .msi packages.
+    Burn,
+    InstallShield,
+    AdvancedInstaller,
+    Squirrel,
     Other,
+}
+
+impl InstallerKind {
+    pub fn label(self) -> &'static str {
+        match self {
+            InstallerKind::Inno => "Inno Setup",
+            InstallerKind::Nsis => "NSIS",
+            InstallerKind::Burn => "WiX bundle",
+            InstallerKind::InstallShield => "InstallShield",
+            InstallerKind::AdvancedInstaller => "Advanced Installer",
+            InstallerKind::Squirrel => "Squirrel",
+            InstallerKind::Other => "unknown",
+        }
+    }
 }
 
 pub fn detect_installer(head: &[u8]) -> InstallerKind {
     let has = |needle: &[u8]| head.windows(needle.len()).any(|w| w == needle);
-    if has(b"Inno Setup") {
+    if crate::bundle::is_burn(head) {
+        InstallerKind::Burn
+    } else if has(b"Inno Setup") {
         InstallerKind::Inno
     } else if has(b"Nullsoft") || has(b"NSIS Error") {
         InstallerKind::Nsis
+    } else if has(b"InstallShield") {
+        InstallerKind::InstallShield
+    } else if has(b"Advanced Installer") {
+        InstallerKind::AdvancedInstaller
+    } else if has(b"SquirrelSetup") || has(b"Squirrel.") {
+        InstallerKind::Squirrel
     } else {
         InstallerKind::Other
     }
@@ -394,9 +421,32 @@ pub fn detect_installer(head: &[u8]) -> InstallerKind {
 pub fn per_user_args(kind: InstallerKind, dir: &str, has_user_args: bool) -> (Vec<String>, Vec<String>) {
     match kind {
         InstallerKind::Inno => (vec!["/CURRENTUSER".into(), format!("/DIR={dir}")], vec![]),
-        // `/D=` must be the last argument and is never quoted.
-        InstallerKind::Nsis if !has_user_args => (vec![], vec![format!("/D={dir}")]),
+        // `/currentuser` picks the per-user mode of installers made with
+        // electron-builder (most Electron apps); other NSIS installers
+        // ignore it. `/D=` must be the last argument and is never quoted.
+        InstallerKind::Nsis if !has_user_args => (vec!["/currentuser".into()], vec![format!("/D={dir}")]),
         _ => (vec![], vec![]),
+    }
+}
+
+/// What an installer's exit code likely means, for the message shown when
+/// no app was found afterwards.
+pub fn explain_exit(kind: InstallerKind, code: u32) -> Option<&'static str> {
+    let admin = "It asked for administrator rights, which a sandbox cannot give.";
+    match (kind, code) {
+        (_, 740) | (_, 1223) => Some(admin),
+        (_, 1601) | (_, 1603) | (_, 1625) | (InstallerKind::Burn, _) if code != 0 => Some(
+            "It tried to use Windows Installer, which a sandbox cannot reach. Isolated looked for the .msi package to unpack itself.",
+        ),
+        (_, 1602) | (InstallerKind::Inno, 2) | (InstallerKind::Inno, 5) | (InstallerKind::Nsis, 1) => {
+            Some("The installer was cancelled.")
+        }
+        (InstallerKind::Inno, 1) => Some("The installer could not start. It may require administrator rights."),
+        (InstallerKind::Nsis, 2) => Some(
+            "The installer stopped itself. Installers that insist on administrator rights do this inside a sandbox.",
+        ),
+        (_, 5) => Some("Windows denied access to something the installer needed."),
+        _ => None,
     }
 }
 
@@ -597,9 +647,14 @@ mod tests {
         assert_eq!(detect_installer(b"Nullsoft Install System"), InstallerKind::Nsis);
         assert_eq!(detect_installer(b"MZ...."), InstallerKind::Other);
         let (pre, post) = per_user_args(InstallerKind::Nsis, r"C:\x y\App", false);
-        assert!(pre.is_empty());
+        assert_eq!(pre, vec!["/currentuser".to_string()]);
         assert_eq!(post, vec![r"/D=C:\x y\App".to_string()]);
         assert!(per_user_args(InstallerKind::Nsis, "d", true).1.is_empty());
         assert_eq!(per_user_args(InstallerKind::Inno, "d", false).0[0], "/CURRENTUSER");
+        assert_eq!(detect_installer(b"..InstallShield.."), InstallerKind::InstallShield);
+        assert!(explain_exit(InstallerKind::Other, 740).is_some());
+        assert!(explain_exit(InstallerKind::Burn, 0).is_none());
+        assert!(explain_exit(InstallerKind::Burn, 1).is_some());
+        assert!(explain_exit(InstallerKind::Other, 1).is_none());
     }
 }

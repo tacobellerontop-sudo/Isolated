@@ -558,7 +558,7 @@ impl App {
         let is_msi = path
             .extension()
             .and_then(|e| e.to_str())
-            .is_some_and(|e| e.eq_ignore_ascii_case("msi"));
+            .is_some_and(|e| e.eq_ignore_ascii_case("msi") || e.eq_ignore_ascii_case("zip"));
         if self.view == View::Installed || is_msi {
             self.open_install_form(&path.to_string_lossy(), None);
         } else {
@@ -595,7 +595,7 @@ impl App {
             if Path::new(&installer).is_file() {
                 Ok(())
             } else {
-                Err("Choose an installer file (.exe or .msi).".to_string())
+                Err("Choose an installer (.exe or .msi) or a portable app (.zip).".to_string())
             }
         });
         if let Err(e) = checked {

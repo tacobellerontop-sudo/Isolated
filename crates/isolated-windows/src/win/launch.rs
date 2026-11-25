@@ -407,7 +407,22 @@ const HOME_ENV: &[&str] = &[
     "OneDrive",
 ];
 
-fn build_env(policy: &Policy, home: Option<&Path>, temp: Option<&Path>, installer: bool) -> Vec<u16> {
+/// Folders a box gives its apps in place of the PC's shared ones.
+struct BoxEnv<'a> {
+    /// The box's base folder (what its apps see as LocalAppData).
+    base: &'a Path,
+    /// Where installers in the box put programs.
+    programs: PathBuf,
+    installer: bool,
+}
+
+fn build_env(
+    policy: &Policy,
+    home: Option<&Path>,
+    temp: Option<&Path>,
+    installer: bool,
+    in_box: Option<&BoxEnv>,
+) -> Vec<u16> {
     let appcontainer = policy.tier == Tier::Isolated;
     // Keys compare case-insensitively on Windows.
     let mut env: BTreeMap<String, (String, String)> = BTreeMap::new();
@@ -430,6 +445,9 @@ fn build_env(policy: &Policy, home: Option<&Path>, temp: Option<&Path>, installe
     if let Some(h) = home {
         let home = h.to_string_lossy().to_string();
         set("USERPROFILE", home.clone(), &mut env);
+        // Command-line tools (Git, SSH, many AI and developer CLIs) look at
+        // HOME first: keep their dotfolders (.cache, .config, ...) inside.
+        set("HOME", home.clone(), &mut env);
         set("APPDATA", h.join(r"AppData\Roaming").to_string_lossy().into(), &mut env);
         // Windows rewrites LOCALAPPDATA for AppContainer processes to
         // `<value>\Packages\<container>\AC`. Passing the real value makes it
@@ -447,6 +465,24 @@ fn build_env(policy: &Policy, home: Option<&Path>, temp: Option<&Path>, installe
     if let Some(p) = temp {
         set("TEMP", p.to_string_lossy().into(), &mut env);
         set("TMP", p.to_string_lossy().into(), &mut env);
+    }
+    if let Some(b) = in_box {
+        // Like Sandboxie and App-V, give apps in a box their own copy of the
+        // folders shared by all users: the real ones are read-only to a
+        // sandbox, and installers that write there would fail.
+        let s = |p: PathBuf| p.to_string_lossy().into_owned();
+        set("ProgramData", s(b.base.join("ProgramData")), &mut env);
+        set("ALLUSERSPROFILE", s(b.base.join("ProgramData")), &mut env);
+        set("PUBLIC", s(b.base.join(r"Users\Public")), &mut env);
+        if b.installer {
+            // Installers that build paths from these install into the box.
+            for k in ["ProgramFiles", "ProgramFiles(x86)", "ProgramW6432"] {
+                set(k, s(b.programs.clone()), &mut env);
+            }
+            for k in ["CommonProgramFiles", "CommonProgramFiles(x86)", "CommonProgramW6432"] {
+                set(k, s(b.programs.join("Common Files")), &mut env);
+            }
+        }
     }
     set("ISOLATED_SANDBOX", "1".into(), &mut env);
     if installer {
@@ -489,6 +525,10 @@ fn make_private_dirs(base: &Path, with_home: bool) -> Result<PrivateDirs> {
         dirs.push(home.join(r"AppData\Roaming\Microsoft\Windows\Start Menu\Programs"));
         dirs.push(home.join(r"AppData\Local\Programs"));
         dirs.push(base.join("Programs"));
+        // Box copies of the folders shared by all users (see build_env).
+        dirs.push(base.join(r"ProgramData\Microsoft\Windows\Start Menu\Programs"));
+        dirs.push(base.join(r"Users\Public\Desktop"));
+        dirs.push(base.join(r"Users\Public\Documents"));
         dirs.push(home.join("Documents"));
         dirs.push(home.join("Downloads"));
         dirs.push(home.join("Desktop"));
@@ -687,7 +727,25 @@ pub fn launch(dirs: &Dirs, policy: &Policy, req: &LaunchRequest) -> Result<Runni
     };
 
     let home = private.as_ref().filter(|_| private_home).map(|p| p.home.as_path());
-    let env = build_env(policy, home, private.as_ref().map(|p| p.temp.as_path()), req.installer);
+    let box_base = private.as_ref().and_then(|p| p.home.parent()).map(Path::to_path_buf);
+    let box_env = match (&req.app_box, &box_base) {
+        (Some(_), Some(base)) => Some(BoxEnv {
+            base,
+            programs: box_install_dir(policy, base, "x")
+                .parent()
+                .map(Path::to_path_buf)
+                .unwrap_or_else(|| base.join("Programs")),
+            installer: req.installer,
+        }),
+        _ => None,
+    };
+    let env = build_env(
+        policy,
+        home,
+        private.as_ref().map(|p| p.temp.as_path()),
+        req.installer,
+        box_env.as_ref(),
+    );
     if req.installer {
         // Also set here: some Windows versions read it from the caller.
         std::env::set_var("__COMPAT_LAYER", "RunAsInvoker");

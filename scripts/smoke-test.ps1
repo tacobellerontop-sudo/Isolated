@@ -25,6 +25,16 @@ Set-Content -Path $secret -Value "do not read me"
 
 & $Exe --version | Out-Host
 
+# The sandbox folder of a box (Packages\<container>), from "box files".
+# isolated.exe is a GUI-subsystem program, so its output goes through a file.
+function Box-Package([string]$Name) {
+    $o = Join-Path $env:TEMP "isolated-box-files.txt"
+    Start-Process -FilePath $Exe -ArgumentList @("box", "files", "`"$Name`"") -Wait -NoNewWindow -RedirectStandardOutput $o -RedirectStandardError "$o.err" | Out-Null
+    $h = (Get-Content $o -ErrorAction SilentlyContinue | Select-Object -First 1)
+    if (-not $h) { return $null }
+    return (Split-Path (Split-Path $h))
+}
+
 
 # 1. Files outside the sandbox are not readable.
 $code = Run-Sandboxed @("run", "--", $cmd, "/d", "/c", "type `"$secret`"")
@@ -84,8 +94,11 @@ $code = Run-Sandboxed @("box", "run", "SmokeFake", "fake", "/d", "/c", "exit 7")
 Check "saved app runs from the box later (exit $code)" ($code -eq 7)
 $code = Run-Sandboxed @("box", "run", "SmokeFake", "fake", "/d", "/c", "type `"$secret`"")
 Check "apps in a box still can't read user files (exit $code)" ($code -ne 0)
+$fakePkg = Box-Package "SmokeFake"
+Write-Host "SmokeFake sandbox folder: $fakePkg"
+Check "new boxes get a short sandbox name ($fakePkg)" ("$fakePkg" -match "\\isolated\.b\.[0-9a-f]{8}$")
 $code = Run-Sandboxed @("box", "delete", "SmokeFake")
-$left = @(Get-ChildItem -Path (Join-Path $env:LOCALAPPDATA "Packages") -Filter "isolated.box.SmokeFake*" -ErrorAction SilentlyContinue).Count
+$left = @(@($fakePkg) | Where-Object { $_ -and (Test-Path $_) }).Count
 Check "deleting a box removes it and its files (exit $code, $left left)" (($code -eq 0) -and -not (Test-Path $boxFile) -and ($left -eq 0))
 
 # 10b. Containers: an empty box made from scratch keeps what its apps save in
@@ -96,7 +109,7 @@ Check "container is created (exit $code)" (($code -eq 0) -and (Test-Path (Join-P
 $realDoc = Join-Path ([Environment]::GetFolderPath("MyDocuments")) "isolated-creation.txt"
 Remove-Item $realDoc -ErrorAction SilentlyContinue
 $code = Run-Sandboxed @("container", "run", "SmokeC", $cmd, "/d", "/c", "echo made> %USERPROFILE%\Documents\isolated-creation.txt")
-$pkg = Get-ChildItem -Path (Join-Path $env:LOCALAPPDATA "Packages") -Filter "isolated.box.SmokeC*" -ErrorAction SilentlyContinue | Select-Object -First 1
+$pkg = Get-Item (Box-Package "SmokeC") -ErrorAction SilentlyContinue
 $inBox = $pkg -and (Test-Path (Join-Path $pkg.FullName "AC\Home\Documents\isolated-creation.txt"))
 Check "a file an app saves lands in the container, not the PC (exit $code)" (($code -eq 0) -and $inBox -and -not (Test-Path $realDoc))
 $code = Run-Sandboxed @("box", "run", "SmokeC", $cmd, "/d", "/c", "cd> %USERPROFILE%\cwd.txt")
@@ -150,10 +163,10 @@ Name: "{autoprograms}\Uninstall Hello Smoke"; Filename: "{uninstallexe}"
     $ok = ($code -eq 0) -and ($boxText -match "Hello Smoke") -and ($boxText -match "hello\.exe")
     Check "Inno Setup installer installs into a box (exit $code)" $ok
     if (-not $ok) {
-        Get-ChildItem -Path (Join-Path $env:LOCALAPPDATA "Packages") -Filter "isolated.box.HelloSmoke*" -ErrorAction SilentlyContinue |
+        Get-Item (Box-Package "HelloSmoke") -ErrorAction SilentlyContinue |
             ForEach-Object { Get-ChildItem -Recurse -Path $_.FullName -Filter "Setup Log*.txt" -ErrorAction SilentlyContinue } |
             ForEach-Object { Write-Host "--- $($_.FullName)"; Get-Content $_.FullName | Out-Host }
-        Get-ChildItem -Path (Join-Path $env:LOCALAPPDATA "Packages") -Filter "isolated.box.HelloSmoke*" -ErrorAction SilentlyContinue |
+        Get-Item (Box-Package "HelloSmoke") -ErrorAction SilentlyContinue |
             ForEach-Object { Get-ChildItem -Recurse -File -Path $_.FullName -ErrorAction SilentlyContinue } |
             ForEach-Object { Write-Host "  file $($_.FullName)" }
     }
@@ -164,7 +177,7 @@ Name: "{autoprograms}\Uninstall Hello Smoke"; Filename: "{uninstallexe}"
     $regAcl = (Get-Acl $uninst).Access | Where-Object { $_.IdentityReference.Value -match "S-1-15-2-" }
     Check "registry grant is removed afterwards" (-not $regAcl)
     $drives = (Get-PSDrive -PSProvider FileSystem).Root -join " "
-    Check "temporary drive letter is removed ($drives)" (-not ((subst) -match "isolated.box"))
+    Check "temporary drive letter is removed ($drives)" (-not ((subst) -match "isolated\.b"))
     Run-Sandboxed @("box", "delete", "HelloSmoke") | Out-Null
 } else {
     Write-Host "SKIP  Inno Setup is not available on this machine"
@@ -173,6 +186,7 @@ Name: "{autoprograms}\Uninstall Hello Smoke"; Filename: "{uninstallexe}"
 # 12. A real .msi package is unpacked into a box (no Windows Installer
 #     service involved) and the program from its Start menu shortcut is saved.
 $msi = Join-Path $instDir "7z2408-x64.msi"
+$sevenZipWasThere = Test-Path "$env:ProgramFiles\7-Zip\7zFM.exe"
 & $curl -sSL -m 180 -o $msi "https://github.com/ip7z/7zip/releases/download/24.08/7z2408-x64.msi"
 if ((Test-Path $msi) -and ((Get-Item $msi).Length -gt 1MB)) {
     $code = Run-Sandboxed @("box", "install", "--no-net", "--box", "SmokeMsi", "--", $msi)
@@ -258,6 +272,126 @@ Check "folder remove stops isolating (exit $code)" ($code -eq 0)
 $code = Run-Sandboxed @("run", "--", "$isoDir\bin\cmd.exe", "/d", "/c", "echo x> `"$isoDir\after.txt`"")
 Check "after folder remove the program can no longer change the folder (exit $code)" (-not (Test-Path "$isoDir\after.txt"))
 Remove-Item -Recurse -Force $isoDir -ErrorAction SilentlyContinue
+
+function Run-Timed([string[]]$IsolatedArgs, [int]$Seconds) {
+    $p = Start-Process -FilePath $Exe -ArgumentList $IsolatedArgs -PassThru -WindowStyle Hidden
+    if ($p.WaitForExit($Seconds * 1000)) { return $p.ExitCode }
+    $p.Kill()
+    return "timeout"
+}
+
+# 15. A setup .exe that wraps .msi packages (a WiX bundle) is unpacked into
+#     a box: it could not reach Windows Installer from inside the sandbox.
+$burn = Join-Path $instDir "wix314.exe"
+& $curl -sSL -m 300 -o $burn "https://github.com/wixtoolset/wix3/releases/download/wix3141rtm/wix314.exe"
+if ((Test-Path $burn) -and ((Get-Item $burn).Length -gt 10MB)) {
+    $code = Run-Timed @("box", "install", "--no-net", "--box", "SmokeBurn", "--", $burn) 600
+    $boxText = (Get-Content (Join-Path $boxesDir "SmokeBurn.toml") -Raw -ErrorAction SilentlyContinue)
+    Write-Host $boxText
+    Check "setup .exe wrapping .msi packages installs into a box (exit $code)" (("$code" -eq "0") -and ($boxText -match "path = "))
+    $m = [regex]::Match("$boxText", 'path = ["'']([^"'']*\\(candle|light|heat)\.exe)["'']')
+    if ($m.Success) {
+        $tool = $m.Groups[1].Value -replace '\\\\', '\'
+        $code = Run-Timed @("box", "run", "SmokeBurn", $tool, "-?") 120
+        Check "program from the bundle runs in its box (exit $code)" ("$code" -ne "timeout")
+    }
+    Run-Sandboxed @("box", "delete", "SmokeBurn") | Out-Null
+} else {
+    Write-Host "SKIP  could not download the WiX bundle"
+}
+
+# 16. A setup program that hands an .msi to Windows Installer: the package
+#     is caught while the setup runs and unpacked when Windows Installer
+#     fails inside the sandbox.
+if ((Test-Path $msi) -and ((Get-Item $msi).Length -gt 1MB)) {
+    $wrap = Join-Path $instDir "msi-setup.cmd"
+    Set-Content -Path $wrap -Value "@echo off`r`ncopy /y `"$msi`" `"%TEMP%\payload.msi`"`r`n`"%SystemRoot%\System32\msiexec.exe`" /i `"%TEMP%\payload.msi`" /qn`r`necho msiexec exit %ERRORLEVEL%> `"%USERPROFILE%\msiexec-exit.txt`"`r`ndel `"%TEMP%\payload.msi`"`r`n"
+    $code = Run-Timed @("box", "install", "--no-net", "--box", "SmokeCatch", "--", $wrap) 600
+    $boxText = (Get-Content (Join-Path $boxesDir "SmokeCatch.toml") -Raw -ErrorAction SilentlyContinue)
+    Write-Host $boxText
+    $pkgCatch = Box-Package "SmokeCatch"
+    if ($pkgCatch) { Write-Host "Inside the sandbox: $(Get-Content (Join-Path $pkgCatch 'AC\Home\msiexec-exit.txt') -ErrorAction SilentlyContinue)" }
+    Check "package handed to Windows Installer is caught and unpacked (exit $code)" (("$code" -eq "0") -and ($boxText -match "7zFM\.exe"))
+    Check "Windows Installer did not install 7-Zip on the PC" (-not (Test-Path "$env:ProgramFiles\7-Zip\7zFM.exe") -or $sevenZipWasThere)
+    Run-Sandboxed @("box", "delete", "SmokeCatch") | Out-Null
+}
+
+# 17. A portable app shipped as a .zip installs into a box.
+$zipSrc = Join-Path $instDir "PortableTool"
+New-Item -ItemType Directory -Force -Path "$zipSrc\data" | Out-Null
+Copy-Item $cmd "$zipSrc\tool.exe"
+Set-Content -Path "$zipSrc\data\readme.txt" -Value "hello"
+$zip = Join-Path $instDir "PortableTool-1.0-win64.zip"
+Compress-Archive -Path $zipSrc -DestinationPath $zip -Force
+$code = Run-Sandboxed @("box", "install", "--no-net", "--box", "SmokeZip", "--", $zip)
+$boxText = (Get-Content (Join-Path $boxesDir "SmokeZip.toml") -Raw -ErrorAction SilentlyContinue)
+Write-Host $boxText
+Check ".zip portable app installs into a box (exit $code)" (($code -eq 0) -and ($boxText -match "tool\.exe"))
+$code = Run-Sandboxed @("box", "run", "SmokeZip", "tool", "/d", "/c", "exit 4")
+Check "app from the .zip runs from its box (exit $code)" ($code -eq 4)
+
+# 18. Apps in a box get the box's own copy of the folders shared by all
+#     users, and HOME points into the box.
+$pkgZip = Box-Package "SmokeZip"
+$code = Run-Sandboxed @("box", "run", "SmokeZip", "tool", "/d", "/c", "echo %ProgramData%^|%PUBLIC%^|%HOME%> %USERPROFILE%\env.txt & echo x> %ProgramData%\probe.txt")
+$envLine = Get-Content (Join-Path "$pkgZip" "AC\Home\env.txt") -ErrorAction SilentlyContinue
+Write-Host "Box environment: $envLine"
+Check "box apps can write their own ProgramData (exit $code)" (($code -eq 0) -and (Test-Path (Join-Path "$pkgZip" "AC\ProgramData\probe.txt")))
+Check "HOME points into the box ($envLine)" ("$envLine" -match [regex]::Escape("$pkgZip"))
+$code = Run-Sandboxed @("box", "run", "SmokeZip", $Exe, "diag-folders", "diag.txt")
+Write-Host "Known folders inside a box (exit $code):"
+Get-Content (Join-Path "$pkgZip" "AC\Home\diag.txt") -ErrorAction SilentlyContinue | ForEach-Object { Write-Host "    $_" }
+Run-Sandboxed @("box", "delete", "SmokeZip") | Out-Null
+
+# 19. AI apps: runtimes they are built on work in a container with internet,
+#     and keep their dotfolders inside it.
+$code = Run-Sandboxed @("box", "create", "SmokeAI", "--net")
+$pkgAI = Box-Package "SmokeAI"
+$aiHome = Join-Path "$pkgAI" "AC\Home"
+$node = (Get-Command node -ErrorAction SilentlyContinue).Source
+if ($node -and (Test-Path $aiHome)) {
+    Set-Content -Path "$aiHome\probe.js" -Value @'
+const fs = require('fs'), os = require('os'), path = require('path');
+fs.mkdirSync(path.join(os.homedir(), '.cache', 'probe'), { recursive: true });
+fs.writeFileSync(path.join(os.homedir(), '.cache', 'probe', 'node.txt'), os.homedir());
+fetch('https://github.com').then(r => process.exit(r.ok ? 0 : 9), e => { fs.writeFileSync('node-error.txt', String(e && (e.cause || e))); process.exit(8); });
+'@
+    $code = Run-Timed @("box", "run", "SmokeAI", $node, "probe.js") 120
+    Write-Host "node error: $(Get-Content "$aiHome\node-error.txt" -ErrorAction SilentlyContinue)"
+    Check "Node.js runs in a container, reaches the internet, keeps ~/.cache inside (exit $code)" (("$code" -eq "0") -and (Test-Path "$aiHome\.cache\probe\node.txt"))
+}
+$python = (Get-Command python -ErrorAction SilentlyContinue).Source
+if ($python -and (Test-Path $aiHome)) {
+    Set-Content -Path "$aiHome\probe.py" -Value @'
+import pathlib, urllib.request, sys, traceback
+d = pathlib.Path.home() / ".config" / "probe"
+d.mkdir(parents=True, exist_ok=True)
+(d / "python.txt").write_text(str(pathlib.Path.home()))
+try:
+    sys.exit(0 if urllib.request.urlopen("https://github.com", timeout=30).status == 200 else 9)
+except Exception:
+    pathlib.Path("python-error.txt").write_text(traceback.format_exc())
+    sys.exit(8)
+'@
+    $code = Run-Timed @("box", "run", "SmokeAI", $python, "probe.py") 120
+    Write-Host "python error: $(Get-Content "$aiHome\python-error.txt" -ErrorAction SilentlyContinue)"
+    Check "Python runs in a container, reaches the internet, keeps ~/.config inside (exit $code)" (("$code" -eq "0") -and (Test-Path "$aiHome\.config\probe\python.txt"))
+}
+$code = Run-Timed @("box", "run", "SmokeAI", $Exe, "diag-loopback", "loop.txt") 60
+$loop = (Get-Content "$aiHome\loop.txt" -ErrorAction SilentlyContinue) -join "; "
+Write-Host "Loopback inside a container (exit $code): $loop"
+Check "programs in a container can talk over localhost ($loop)" (("$loop" -match "same process: Ok") -and ("$loop" -match "other process: Ok\(Some\(0\)\)"))
+foreach ($browser in @("${env:ProgramFiles(x86)}\Microsoft\Edge\Application\msedge.exe", "$env:ProgramFiles\Google\Chrome\Application\chrome.exe")) {
+    if (-not (Test-Path $browser)) { continue }
+    $name = Split-Path $browser -Leaf
+    foreach ($extra in @(@(), @("--no-sandbox"))) {
+        Remove-Item "$aiHome\shot.png" -ErrorAction SilentlyContinue
+        $bargs = @("box", "run", "SmokeAI", $browser, "--headless=new", "--disable-gpu", "--screenshot=shot.png", "--window-size=800,600") + $extra + @("https://example.com")
+        $code = Run-Timed $bargs 90
+        Write-Host "INFO  Chromium ($name $($extra -join ' ')) in a container: exit $code, screenshot $(Test-Path "$aiHome\shot.png")"
+    }
+}
+Run-Sandboxed @("box", "delete", "SmokeAI") | Out-Null
 
 # 8. Right-click menu registers and unregisters.
 & $Exe register | Out-Null

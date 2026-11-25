@@ -290,6 +290,130 @@ pub mod boxes {
         v
     }
 
+    /// Copies `.msi` packages that appear in a box while an installer runs.
+    ///
+    /// Many setup programs only unpack a Windows Installer package and hand
+    /// it to the Windows Installer service, which a sandbox cannot reach, so
+    /// they fail and often delete the package again. Capture tools such as
+    /// Cameyo and Turbo record what an installer lays down; Isolated keeps a
+    /// copy of each package (and the `.cab` files beside it) as it appears,
+    /// so it can unpack it itself afterwards.
+    pub struct MsiCatcher {
+        stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+        thread: Option<std::thread::JoinHandle<Vec<PathBuf>>>,
+    }
+
+    impl MsiCatcher {
+        /// Watches `box_folder` and copies packages into `keep`.
+        pub fn start(box_folder: &Path, keep: &Path) -> MsiCatcher {
+            let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let (folder, keep, flag) = (box_folder.to_path_buf(), keep.to_path_buf(), stop.clone());
+            let thread = std::thread::spawn(move || {
+                let mut seen: std::collections::HashMap<PathBuf, (u64, Option<std::time::SystemTime>, PathBuf)> =
+                    std::collections::HashMap::new();
+                loop {
+                    let last = flag.load(std::sync::atomic::Ordering::Relaxed);
+                    catch_once(&folder, &keep, &mut seen);
+                    if last {
+                        break;
+                    }
+                    for _ in 0..7 {
+                        if flag.load(std::sync::atomic::Ordering::Relaxed) {
+                            break;
+                        }
+                        std::thread::sleep(std::time::Duration::from_millis(100));
+                    }
+                }
+                let mut out: Vec<PathBuf> = seen.into_values().map(|(_, _, d)| d).filter(|d| is_msi(d)).collect();
+                out.sort();
+                out
+            });
+            MsiCatcher {
+                stop,
+                thread: Some(thread),
+            }
+        }
+
+        /// Stops watching (after one last look) and returns the copies.
+        pub fn finish(mut self) -> Vec<PathBuf> {
+            self.stop.store(true, std::sync::atomic::Ordering::Relaxed);
+            self.thread.take().and_then(|t| t.join().ok()).unwrap_or_default()
+        }
+    }
+
+    impl Drop for MsiCatcher {
+        fn drop(&mut self) {
+            self.stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+
+    fn is_msi(p: &Path) -> bool {
+        use std::io::Read;
+        let mut head = [0u8; 8];
+        std::fs::File::open(p)
+            .and_then(|mut f| f.read_exact(&mut head))
+            .is_ok_and(|_| head == [0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1])
+    }
+
+    fn catch_once(
+        folder: &Path,
+        keep: &Path,
+        seen: &mut std::collections::HashMap<PathBuf, (u64, Option<std::time::SystemTime>, PathBuf)>,
+    ) {
+        let mut found = Vec::new();
+        find_packages(folder, keep, 0, &mut found);
+        for p in found {
+            let Ok(meta) = std::fs::metadata(&p) else { continue };
+            let stamp = (meta.len(), meta.modified().ok());
+            let dest = match seen.get(&p) {
+                Some((len, time, _)) if (*len, *time) == stamp => continue,
+                Some((_, _, d)) => d.clone(),
+                None => {
+                    let slot = keep.join(format!("{}", seen.len() + 1));
+                    slot.join(p.file_name().unwrap_or_default())
+                }
+            };
+            let Some(slot) = dest.parent() else { continue };
+            if std::fs::create_dir_all(slot).is_err() || std::fs::copy(&p, &dest).is_err() {
+                continue;
+            }
+            // Packages may keep their files in cabinets beside them.
+            if dest.extension().is_some_and(|e| e.eq_ignore_ascii_case("msi")) {
+                if let Some(Ok(rd)) = p.parent().map(std::fs::read_dir) {
+                    for e in rd.flatten() {
+                        let c = e.path();
+                        if c.extension().is_some_and(|x| x.eq_ignore_ascii_case("cab")) {
+                            let _ = std::fs::copy(&c, slot.join(e.file_name()));
+                        }
+                    }
+                }
+            }
+            seen.insert(p, (stamp.0, stamp.1, dest));
+        }
+    }
+
+    fn find_packages(dir: &Path, keep: &Path, depth: usize, out: &mut Vec<PathBuf>) {
+        if depth > 10 || out.len() > 64 {
+            return;
+        }
+        let Ok(rd) = std::fs::read_dir(dir) else { return };
+        for e in rd.flatten() {
+            let Ok(ft) = e.file_type() else { continue };
+            let p = e.path();
+            if ft.is_dir() {
+                // Installed programs are large and never hold the package
+                // being installed.
+                let name = e.file_name().to_string_lossy().to_ascii_lowercase();
+                if name == "programs" || p == keep {
+                    continue;
+                }
+                find_packages(&p, keep, depth + 1, out);
+            } else if ft.is_file() && p.extension().is_some_and(|x| x.eq_ignore_ascii_case("msi")) {
+                out.push(p);
+            }
+        }
+    }
+
     /// Programs and shortcuts in a box, to compare before and after an install.
     pub fn snapshot(folder: &Path) -> BTreeSet<String> {
         list(folder)
@@ -566,6 +690,10 @@ pub mod shell {
                 ("LocalAppDataLow", known_folder(K::LocalAppDataLow)),
                 ("RoamingAppData", known_folder(K::RoamingAppData)),
                 ("LocalAppData", known_folder(K::LocalAppData)),
+                ("ProgramData", known_folder(K::ProgramData)),
+                ("CommonPrograms", known_folder(K::CommonPrograms)),
+                ("PublicDesktop", known_folder(K::PublicDesktop)),
+                ("ProgramFiles", known_folder(K::ProgramFiles)),
             ]
         }
         #[cfg(not(windows))]

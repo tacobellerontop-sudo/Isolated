@@ -251,11 +251,72 @@ fn dispatch(args: Vec<OsString>, out: &Out) -> Result<ExitCode, String> {
             for (name, detail) in shell::known_folders_detail() {
                 text.push_str(&format!("{name}: {detail}\n"));
             }
-            for var in ["USERPROFILE", "APPDATA", "LOCALAPPDATA", "TEMP"] {
+            for var in [
+                "USERPROFILE",
+                "APPDATA",
+                "LOCALAPPDATA",
+                "TEMP",
+                "ProgramData",
+                "ALLUSERSPROFILE",
+                "PUBLIC",
+                "ProgramFiles",
+            ] {
                 text.push_str(&format!("%{var}% = {}\n", std::env::var(var).unwrap_or_default()));
             }
             std::fs::write(&file, text).map_err(|e| format!("{}: {e}", file.display()))?;
             Ok(ExitCode::SUCCESS)
+        }
+        "diag-loopback" => {
+            // For diagnosis: can programs in a sandbox talk to each other
+            // over localhost (local AI model servers rely on it)?
+            use std::io::{Read, Write};
+            let file = single_path(&mut parser)?;
+            let mut text = String::new();
+            match std::net::TcpListener::bind("127.0.0.1:0") {
+                Err(e) => text.push_str(&format!("listen: error {e}\n")),
+                Ok(l) => {
+                    let port = l.local_addr().map(|a| a.port()).unwrap_or(0);
+                    text.push_str(&format!("listen: ok on {port}\n"));
+                    std::thread::spawn(move || {
+                        for mut c in l.incoming().flatten() {
+                            let mut b = [0u8; 1];
+                            if c.read_exact(&mut b).is_ok() {
+                                let _ = c.write_all(b"y");
+                            }
+                        }
+                    });
+                    let timeout = std::time::Duration::from_secs(5);
+                    let addr: std::net::SocketAddr = ([127, 0, 0, 1], port).into();
+                    let same = std::net::TcpStream::connect_timeout(&addr, timeout).and_then(|mut c| {
+                        c.set_read_timeout(Some(timeout))?;
+                        c.write_all(b"x")?;
+                        let mut b = [0u8; 1];
+                        c.read_exact(&mut b)
+                    });
+                    text.push_str(&format!("same process: {:?}\n", same.map(|_| "ok")));
+                    let child = std::process::Command::new(std::env::current_exe().map_err(|e| e.to_string())?)
+                        .args(["diag-connect", &port.to_string()])
+                        .status();
+                    text.push_str(&format!("other process: {:?}\n", child.map(|s| s.code())));
+                }
+            }
+            std::fs::write(&file, text).map_err(|e| format!("{}: {e}", file.display()))?;
+            Ok(ExitCode::SUCCESS)
+        }
+        "diag-connect" => {
+            use std::io::{Read, Write};
+            let port: u16 = single_value(&mut parser, "a port")?.parse().map_err(|_| "bad port")?;
+            let addr: std::net::SocketAddr = ([127, 0, 0, 1], port).into();
+            let timeout = std::time::Duration::from_secs(5);
+            let ok = std::net::TcpStream::connect_timeout(&addr, timeout)
+                .and_then(|mut c| {
+                    c.set_read_timeout(Some(timeout))?;
+                    c.write_all(b"x")?;
+                    let mut b = [0u8; 1];
+                    c.read_exact(&mut b)
+                })
+                .is_ok();
+            Ok(if ok { ExitCode::SUCCESS } else { ExitCode::from(3) })
         }
         "repair" => {
             let n = isolated_windows::repair(&dirs)?;
@@ -1039,9 +1100,73 @@ fn box_install(mut parser: lexopt::Parser, dirs: &Dirs, store: &ProfileStore, ou
 
     let folder = isolated_windows::boxes::folder(&policy, &b.name)?;
     let before = isolated_windows::boxes::snapshot(&folder);
-    if target_s.to_ascii_lowercase().ends_with(".msi") {
-        return msi_install(&target, &b, &policy, &folder, &before, dirs, out);
+    let lower = target_s.to_ascii_lowercase();
+    if lower.ends_with(".msi") {
+        let packages = vec![target.clone()];
+        return unpack_packages(&packages, &b, &policy, &folder, &before, dirs, out, "");
     }
+    if lower.ends_with(".zip") {
+        return zip_install(&target, &b, &policy, &folder, &before, dirs, out);
+    }
+
+    let head = if lower.ends_with(".exe") {
+        read_head(&target, 8 << 20)
+    } else {
+        Vec::new()
+    };
+    let kind = isolated_core::boxes::detect_installer(&head);
+
+    // Setup programs that only carry .msi packages cannot reach Windows
+    // Installer from a sandbox. Take the packages out and unpack them, the
+    // way .msi files are handled, without running the setup program.
+    if kind == isolated_core::boxes::InstallerKind::Burn && args.is_empty() {
+        let stage = dirs.data.join("unpack").join(isolated_core::state::new_sandbox_id());
+        out.info("This setup program installs Windows Installer packages. Taking them out to unpack them...");
+        let extracted = isolated_core::bundle::extract_burn(&target, &stage);
+        let result = match &extracted {
+            Ok(x) if !x.packages.is_empty() => {
+                let mut note = String::new();
+                if x.skipped_programs > 0 {
+                    note.push_str(&format!(
+                        " {} extra setup programs in the bundle (usually runtimes your PC already has) were left out.",
+                        x.skipped_programs
+                    ));
+                }
+                if x.not_included > 0 {
+                    note.push_str(&format!(
+                        " {} packages the setup program would download were left out.",
+                        x.not_included
+                    ));
+                }
+                Some(unpack_packages(
+                    &x.packages,
+                    &b,
+                    &policy,
+                    &folder,
+                    &before,
+                    dirs,
+                    out,
+                    &note,
+                ))
+            }
+            _ => None,
+        };
+        let _ = std::fs::remove_dir_all(&stage);
+        match result {
+            Some(Ok(code)) => return Ok(code),
+            Some(Err(e)) => out.info(&format!(
+                "Could not unpack the packages ({e}); running the setup program instead."
+            )),
+            None => {
+                if let Err(e) = extracted {
+                    out.info(&format!(
+                        "Could not take the packages out ({e}); running the setup program instead."
+                    ));
+                }
+            }
+        }
+    }
+
     // Fully isolated sandboxes cannot see the system drive's root, which
     // some installers check; give them a drive whose root is the box.
     let alias = if policy.tier == Tier::Isolated {
@@ -1053,9 +1178,7 @@ fn box_install(mut parser: lexopt::Parser, dirs: &Dirs, store: &ProfileStore, ou
     // Ask installers we recognize to install for this user, into the box.
     let mut pre = Vec::new();
     let mut raw_tail = String::new();
-    if target_s.to_ascii_lowercase().ends_with(".exe") {
-        let head = read_head(&target, 8 << 20);
-        let kind = isolated_core::boxes::detect_installer(&head);
+    if lower.ends_with(".exe") {
         let app_dir = isolated_core::boxes::name_from_installer(&target_s);
         let base = alias.as_ref().map(|a| a.root()).unwrap_or_else(|| folder.clone());
         let dir = isolated_windows::boxes::install_dir(&policy, &base, &app_dir);
@@ -1075,6 +1198,8 @@ fn box_install(mut parser: lexopt::Parser, dirs: &Dirs, store: &ProfileStore, ou
         raw_tail,
         workdir: None,
     };
+    let keep = dirs.data.join("captured").join(isolated_core::state::new_sandbox_id());
+    let catcher = isolated_windows::boxes::MsiCatcher::start(&folder, &keep);
     let sandbox = isolated_windows::launch(dirs, &policy, &req)?;
     out.info(&format!(
         "Installing {} into box {} (sandbox {}). Isolated waits until the installer and anything it started have closed.",
@@ -1083,6 +1208,7 @@ fn box_install(mut parser: lexopt::Parser, dirs: &Dirs, store: &ProfileStore, ou
         sandbox.id()
     ));
     let code = sandbox.wait()?;
+    let captured = catcher.finish();
 
     let (shortcuts, exes) = isolated_windows::boxes::found_since(&folder, &before, alias.as_ref());
     drop(alias);
@@ -1092,6 +1218,29 @@ fn box_install(mut parser: lexopt::Parser, dirs: &Dirs, store: &ProfileStore, ou
     let names: Vec<String> = found.iter().map(|a| a.name.clone()).collect();
     let added = b.add_apps(found);
     b.save(dirs)?;
+
+    // The installer handed a package to Windows Installer, which failed in
+    // the sandbox: unpack what it tried to install.
+    if added == 0 && !captured.is_empty() {
+        out.info(
+            "The installer used Windows Installer, which a sandbox cannot reach. Unpacking its package instead...",
+        );
+        let r = unpack_packages(
+            &captured,
+            &b,
+            &policy,
+            &folder,
+            &before,
+            dirs,
+            out,
+            " The setup program could not finish inside the sandbox, so Isolated unpacked the package it was installing.",
+        );
+        let _ = std::fs::remove_dir_all(&keep);
+        if r.is_ok() {
+            return r;
+        }
+    }
+    let _ = std::fs::remove_dir_all(&keep);
 
     let msg = if added > 0 {
         format!(
@@ -1107,9 +1256,13 @@ fn box_install(mut parser: lexopt::Parser, dirs: &Dirs, store: &ProfileStore, ou
             b.name
         )
     } else {
+        let why = isolated_core::boxes::explain_exit(kind, code)
+            .map(|w| format!("{w}\n\n"))
+            .unwrap_or_default();
         format!(
-            "The installer finished (exit code {code}), but no program was found in box '{}'.\n\nIf the installer showed an error, it may need administrator rights, which a sandbox cannot give. Otherwise, add the program from the Installed apps list.",
-            b.name
+            "The installer finished (exit code {code}), but no program was found in box '{}'.\n\n{why}If the installer showed an error, it may need administrator rights, which a sandbox cannot give. Look for a \"portable\" .zip version of the app, which Isolated can also install. Otherwise, add the program from the Installed apps list.\n\nInstaller type: {}.",
+            b.name,
+            kind.label()
         )
     };
     finish_install(&b, added, &msg, out)
@@ -1123,10 +1276,136 @@ fn finish_install(b: &AppBox, added: usize, msg: &str, out: &Out) -> Result<Exit
     Ok(ExitCode::from(if added > 0 || !b.apps.is_empty() { 0 } else { 2 }))
 }
 
-/// Installs a `.msi` package by unpacking it into the box. Windows Installer
-/// is a system service a sandbox cannot use, so no installer code runs:
-/// Isolated places the package's files and reads its shortcuts itself.
-fn msi_install(
+fn box_folders(policy: &Policy, folder: &std::path::Path) -> Result<isolated_core::msi::BoxFolders, String> {
+    let programs = isolated_windows::boxes::install_dir(policy, folder, "x")
+        .parent()
+        .map(std::path::Path::to_path_buf)
+        .ok_or("could not find the box's Programs folder")?;
+    Ok(isolated_core::msi::BoxFolders {
+        local_app_data: programs
+            .parent()
+            .map(std::path::Path::to_path_buf)
+            .unwrap_or_else(|| folder.to_path_buf()),
+        programs,
+        home: folder.join("Home"),
+    })
+}
+
+/// Saves the programs that appeared in the box and reports.
+fn save_found(
+    b: &AppBox,
+    folder: &std::path::Path,
+    before: &std::collections::BTreeSet<String>,
+    extra: Vec<isolated_core::boxes::FoundShortcut>,
+    dirs: &Dirs,
+) -> Result<(AppBox, Vec<String>, usize), String> {
+    let (mut shortcuts, exes) = isolated_windows::boxes::found_since(folder, before, None);
+    shortcuts.extend(extra);
+    let found = isolated_core::boxes::choose_apps(&shortcuts, &exes);
+    let mut b = AppBox::load(dirs, &b.name).unwrap_or_else(|| b.clone());
+    let names: Vec<String> = found.iter().map(|a| a.name.clone()).collect();
+    let added = b.add_apps(found);
+    b.save(dirs)?;
+    Ok((b, names, added))
+}
+
+/// Installs `.msi` packages by unpacking them into the box. Windows
+/// Installer is a system service a sandbox cannot use, so no installer code
+/// runs: Isolated places the packages' files and reads their shortcuts
+/// itself. `note` is added to the message.
+#[allow(clippy::too_many_arguments)]
+fn unpack_packages(
+    packages: &[PathBuf],
+    b: &AppBox,
+    policy: &Policy,
+    folder: &std::path::Path,
+    before: &std::collections::BTreeSet<String>,
+    dirs: &Dirs,
+    out: &Out,
+    note: &str,
+) -> Result<ExitCode, String> {
+    let folders = box_folders(policy, folder)?;
+    let with_arch: Vec<(PathBuf, String)> = packages
+        .iter()
+        .map(|p| (p.clone(), isolated_core::msi::arch(p)))
+        .collect();
+    let chosen = isolated_core::msi::pick_for_pc(&with_arch);
+    let mut shortcuts = Vec::new();
+    let (mut files, mut skipped) = (0usize, 0usize);
+    let mut product = String::new();
+    let mut errors = Vec::new();
+    for p in &chosen {
+        out.info(&format!(
+            "Unpacking {} into box {}...",
+            p.file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default(),
+            b.name
+        ));
+        match isolated_core::msi::unpack(p, folder, &folders) {
+            Ok(u) => {
+                files += u.files;
+                skipped += u.skipped_system;
+                if product.is_empty() {
+                    product = u.product.clone();
+                }
+                shortcuts.extend(u.shortcuts);
+            }
+            Err(e) => errors.push(e),
+        }
+    }
+    if files == 0 {
+        return Err(format!(
+            "Could not install {}: {}",
+            packages.first().map(|p| p.display().to_string()).unwrap_or_default(),
+            errors.first().cloned().unwrap_or_else(|| "no files to unpack".into())
+        ));
+    }
+    let (b, names, added) = save_found(b, folder, before, shortcuts, dirs)?;
+    let product = if product.is_empty() {
+        "The app".to_string()
+    } else {
+        product
+    };
+    let mut msg = if added > 0 {
+        format!(
+            "{product} was unpacked into box '{}' ({files} files). Saved {}.\n\nStart it from the Installed apps list in the Isolated window, or run: isolated box run \"{}\" \"{}\"",
+            b.name,
+            names.join(", "),
+            b.name,
+            names[0]
+        )
+    } else if !b.apps.is_empty() {
+        format!(
+            "{product} was unpacked into box '{}' ({files} files). No new programs were found, so the box keeps its saved apps.",
+            b.name
+        )
+    } else {
+        format!(
+            "{product} was unpacked into box '{}' ({files} files), but no program was found in it. Add the program from the Installed apps list.",
+            b.name
+        )
+    };
+    msg.push_str("\n\nIsolated unpacks Windows Installer packages itself, without running the installer's own code, so settings, services or file types the installer would set up are left out.");
+    msg.push_str(note);
+    if skipped > 0 {
+        msg.push_str(&format!(
+            " {skipped} files meant for Windows system folders were skipped."
+        ));
+    }
+    if !errors.is_empty() {
+        msg.push_str(&format!(
+            " {} package(s) could not be unpacked: {}",
+            errors.len(),
+            errors.join("; ")
+        ));
+    }
+    finish_install(&b, added, &msg, out)
+}
+
+/// Installs an app shipped as a .zip (a "portable" app) by unpacking it
+/// into the box's Programs folder.
+fn zip_install(
     target: &std::path::Path,
     b: &AppBox,
     policy: &Policy,
@@ -1135,69 +1414,27 @@ fn msi_install(
     dirs: &Dirs,
     out: &Out,
 ) -> Result<ExitCode, String> {
-    use isolated_core::msi::{unpack, BoxFolders};
-    let programs = isolated_windows::boxes::install_dir(policy, folder, "x")
-        .parent()
-        .map(std::path::Path::to_path_buf)
-        .ok_or("could not find the box's Programs folder")?;
-    let folders = BoxFolders {
-        local_app_data: programs
-            .parent()
-            .map(std::path::Path::to_path_buf)
-            .unwrap_or_else(|| folder.to_path_buf()),
-        programs,
-        home: folder.join("Home"),
-    };
-    out.info(&format!(
-        "Unpacking {} into box {}...",
-        target
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_default(),
-        b.name
-    ));
-    let u = unpack(target, folder, &folders).map_err(|e| format!("Could not install {}: {e}", target.display()))?;
-
-    let (mut shortcuts, exes) = isolated_windows::boxes::found_since(folder, before, None);
-    shortcuts.extend(u.shortcuts.iter().cloned());
-    let found = isolated_core::boxes::choose_apps(&shortcuts, &exes);
-    let mut b = AppBox::load(dirs, &b.name).unwrap_or_else(|| b.clone());
-    let names: Vec<String> = found.iter().map(|a| a.name.clone()).collect();
-    let added = b.add_apps(found);
-    b.save(dirs)?;
-
-    let product = if u.product.is_empty() {
-        "The app".to_string()
-    } else {
-        u.product.clone()
-    };
-    let mut msg = if added > 0 {
+    let name = isolated_core::boxes::name_from_installer(&target.to_string_lossy());
+    let dest = isolated_core::boxes::free_name(&box_folders(policy, folder)?.programs, &name);
+    out.info(&format!("Unpacking {} into box {}...", target.display(), b.name));
+    let u = isolated_core::zip::unpack(target, &dest)
+        .map_err(|e| format!("Could not install {}: {e}", target.display()))?;
+    let (b, names, added) = save_found(b, folder, before, Vec::new(), dirs)?;
+    let msg = if added > 0 {
         format!(
-            "{product} was unpacked into box '{}' ({} files). Saved {}.\n\nStart it from the Installed apps list in the Isolated window, or run: isolated box run \"{}\" \"{}\"",
+            "Unpacked into box '{}' ({} files). Saved {}.\n\nStart it from the Installed apps list in the Isolated window, or run: isolated box run \"{}\" \"{}\"",
             b.name,
             u.files,
             names.join(", "),
             b.name,
             names[0]
         )
-    } else if !b.apps.is_empty() {
-        format!(
-            "{product} was unpacked into box '{}' ({} files). No new programs were found, so the box keeps its saved apps.",
-            b.name, u.files
-        )
     } else {
         format!(
-            "{product} was unpacked into box '{}' ({} files), but no program was found in it. Add the program from the Installed apps list.",
+            "Unpacked into box '{}' ({} files), but no program (.exe) was found in it. Open the container's files to see what it holds.",
             b.name, u.files
         )
     };
-    msg.push_str("\n\nIsolated unpacks .msi files itself, without running the installer's own code, so settings, services or file types the installer would set up are left out.");
-    if u.skipped_system > 0 {
-        msg.push_str(&format!(
-            " {} files meant for Windows system folders were skipped.",
-            u.skipped_system
-        ));
-    }
     finish_install(&b, added, &msg, out)
 }
 
