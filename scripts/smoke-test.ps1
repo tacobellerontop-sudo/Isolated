@@ -428,6 +428,16 @@ app.whenReady().then(async () => {
   app.quit();
 }).catch((e) => { out('error ' + e); app.exit(3); });
 '@
+    # Can a program inside the container start other programs stored in it?
+    # (Electron apps start copies of themselves; CLI agents start tools.)
+    $probeLine = "copy /y %SystemRoot%\System32\whoami.exe %USERPROFILE%\w2.exe >nul & %USERPROFILE%\w2.exe > o-inside.txt 2>&1 & `"$aiHome\node.exe`" -v > o-node.txt 2>&1 & whoami > o-sys.txt 2>&1"
+    Run-Timed @("box", "run", "SmokeAI", $cmd, "/d", "/c", $probeLine) 60 | Out-Null
+    foreach ($f in @("o-inside", "o-node", "o-sys")) { Write-Host "INFO  child start ${f}: $(Get-Content "$aiHome\$f.txt" -ErrorAction SilentlyContinue)" }
+    Write-Host "ACL of node.exe copy:"; icacls "$aiHome\node.exe" | Out-Host
+    Write-Host "ACL of w2.exe (made inside):"; icacls "$aiHome\w2.exe" | Out-Host
+    Write-Host "ACL of the AC folder:"; icacls (Split-Path $aiHome) | Out-Host
+    $code = Run-Timed @("box", "run", "SmokeAI", "$aiHome\node.exe", "probe.js") 60
+    Write-Host "INFO  node.exe copy started directly: exit $code"
     if ($m.Success) {
         $electron = $m.Groups[1].Value -replace '\\\\', '\'
         foreach ($extra in @("", "--no-sandbox")) {
