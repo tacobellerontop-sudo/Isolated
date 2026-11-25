@@ -497,14 +497,21 @@ node, electron, label = sys.argv[1], sys.argv[2], sys.argv[3]
 out = []
 def run(name, args, env=None):
     e = dict(os.environ); e.update(env or {})
+    log = 'run-out.txt'
     try:
-        r = subprocess.run(args, capture_output=True, timeout=90, env=e)
-        text = (r.stdout + r.stderr).decode('utf-8', 'replace').strip().splitlines()
+        with open(log, 'wb') as f:
+            try:
+                r = subprocess.run(args, stdout=f, stderr=subprocess.STDOUT, timeout=60, env=e)
+                code = f'{r.returncode:#x}'
+            except subprocess.TimeoutExpired:
+                code = 'timeout'
+        text = open(log, 'rb').read().decode('utf-8', 'replace').splitlines()
         keep = [l for l in text if any(k in l for k in ('Error', 'ERROR', 'FATAL', 'EPERM', 'denied', 'title', 'Check failed'))][:12]
-        out.append(f'{label} {name}: exit {r.returncode:#x}')
+        out.append(f'{label} {name}: exit {code}')
         out.extend('      ' + l[:220] for l in keep)
     except Exception as ex:
         out.append(f'{label} {name}: {ex!r}')
+    open('diag-' + label + '.txt', 'w').write('\n'.join(out))
 run('node probe.js', [node, 'probe.js'])
 run('node preserve-symlinks', [node, '--preserve-symlinks', '--preserve-symlinks-main', 'probe.js'])
 if electron:
@@ -522,11 +529,11 @@ $boxText = (Get-Content (Join-Path $boxesDir "SmokeAI.toml") -Raw -ErrorAction S
 $m2 = [regex]::Match("$boxText", 'path = ["'']([^"'']*\\electron\.exe)["'']')
 if ($m2.Success) { $electronExe = $m2.Groups[1].Value -replace '\\\\', '\' }
 if ($node -and $python) {
-    Run-Timed @("box", "run", "SmokeAI", $python, "diag.py", $node, $electronExe, "before") 600 | Out-Null
+    Run-Timed @("box", "run", "SmokeAI", $python, "diag.py", $node, $electronExe, "before") 420 | Out-Null
     Get-Content "$aiHome\diag-before.txt" -ErrorAction SilentlyContinue | ForEach-Object { Write-Host "    $_" }
     $chain = @("C:\", "C:\Users", $env:USERPROFILE, "$env:USERPROFILE\AppData", "$env:LOCALAPPDATA", "$env:LOCALAPPDATA\Packages")
     foreach ($d in $chain) { icacls $d /grant "*S-1-15-2-1:(RA)" | Out-Null }
-    Run-Timed @("box", "run", "SmokeAI", $python, "diag.py", $node, $electronExe, "after-RA") 600 | Out-Null
+    Run-Timed @("box", "run", "SmokeAI", $python, "diag.py", $node, $electronExe, "after-RA") 420 | Out-Null
     Get-Content "$aiHome\diag-after-RA.txt" -ErrorAction SilentlyContinue | ForEach-Object { Write-Host "    $_" }
     foreach ($d in $chain) { icacls $d /remove "*S-1-15-2-1" | Out-Null }
 }
