@@ -626,7 +626,10 @@ if (-not $watcher.HasExited) { $watcher.Kill() }
 # 21. No program started by the tests above was flagged as leaving its
 #     sandbox (the warning is meant for approved administrator prompts).
 $escLog = Join-Path $env:LOCALAPPDATA "Isolated\escapes.log"
-if (Test-Path $escLog) { Get-Content $escLog | ForEach-Object { Write-Host "    $_" } }
+if (Test-Path $escLog) {
+    Get-Content $escLog | ForEach-Object { Write-Host "    $_" }
+    Get-CimInstance Win32_Process -Filter "Name='msedge.exe'" | ForEach-Object { Write-Host "    alive $($_.ProcessId) parent $($_.ParentProcessId): $($_.CommandLine)" }
+}
 Check "no false warnings about programs leaving a sandbox" (-not (Test-Path $escLog))
 
 # 8. Right-click menu registers and unregisters.

@@ -126,6 +126,7 @@ fn run(job: HANDLE, label: &str, log: &std::path::Path, stop: &AtomicBool) {
                 continue;
             }
             warned.insert(pid);
+            let detail = describe(pid);
             let text = format!(
                 "{label} (in a sandbox) got {name} started outside the sandbox, most likely through an administrator prompt.\n\n\
                  {name} is not isolated: it can see and change your PC, with administrator rights if you approved them. \
@@ -134,11 +135,69 @@ fn run(job: HANDLE, label: &str, log: &std::path::Path, stop: &AtomicBool) {
             );
             if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(log) {
                 use std::io::Write;
-                let _ = writeln!(f, "{label} -> {name} (pid {pid}) started outside the sandbox");
+                let _ = writeln!(
+                    f,
+                    "{label} -> {name} (pid {pid}, parent {parent}) started outside the sandbox: {detail}"
+                );
             }
             eprintln!("Warning: {label} got {name} started outside the sandbox.");
             std::thread::spawn(move || message_box("Isolated: a program left the sandbox", &text, Icon::Warning));
         }
         std::thread::sleep(Duration::from_millis(700));
+    }
+}
+
+/// Path and integrity level of a process, for the log.
+fn describe(pid: u32) -> String {
+    use windows::Win32::Security::{
+        GetSidSubAuthority, GetSidSubAuthorityCount, GetTokenInformation, TokenIntegrityLevel, TOKEN_MANDATORY_LABEL,
+        TOKEN_QUERY,
+    };
+    use windows::Win32::System::Threading::{
+        OpenProcess, OpenProcessToken, QueryFullProcessImageNameW, PROCESS_NAME_WIN32,
+        PROCESS_QUERY_LIMITED_INFORMATION,
+    };
+    unsafe {
+        let Ok(p) = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) else {
+            return "gone or not readable".into();
+        };
+        let p = OwnedHandle(p);
+        let mut buf = [0u16; 1024];
+        let mut len = buf.len() as u32;
+        let path = if QueryFullProcessImageNameW(
+            p.raw(),
+            PROCESS_NAME_WIN32,
+            windows::core::PWSTR(buf.as_mut_ptr()),
+            &mut len,
+        )
+        .is_ok()
+        {
+            String::from_utf16_lossy(&buf[..len as usize])
+        } else {
+            "?".into()
+        };
+        let mut level = String::from("?");
+        let mut tok = HANDLE::default();
+        if OpenProcessToken(p.raw(), TOKEN_QUERY, &mut tok).is_ok() {
+            let tok = OwnedHandle(tok);
+            let mut info = [0u8; 256];
+            let mut needed = 0u32;
+            if GetTokenInformation(
+                tok.raw(),
+                TokenIntegrityLevel,
+                Some(info.as_mut_ptr() as *mut c_void),
+                info.len() as u32,
+                &mut needed,
+            )
+            .is_ok()
+            {
+                let label = &*(info.as_ptr() as *const TOKEN_MANDATORY_LABEL);
+                let count = *GetSidSubAuthorityCount(label.Label.Sid);
+                if count > 0 {
+                    level = format!("{:#x}", *GetSidSubAuthority(label.Label.Sid, count as u32 - 1));
+                }
+            }
+        }
+        format!("{path}, integrity {level}")
     }
 }
