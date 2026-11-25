@@ -149,6 +149,36 @@ out. Most apps that ship as an `.msi` only need their files; the 7-Zip
 keep their files in `.cab` files next to them are supported when those files
 are there; packages split across several cabinets are not yet.
 
+**AI apps, developer tools and game launchers.** Command-line AI tools
+and the runtimes under them keep their dotfolders (`.cache`, `.config`,
+`.npm` and so on) in the box instead of your user folder, because a box
+gives them their own `HOME` and AppData.
+
+- **Python** tools and local model servers work in a container, including
+  servers on `localhost` and child processes.
+- **Node.js** needs a one-time change before it can start in a container:
+  Windows doesn't let containers see that `C:\` and `C:\Users` are folders,
+  and Node checks every folder above its files. Open **Settings > App
+  compatibility > Allow** (it asks for administrator approval once), or run
+  `isolated system-compat` as administrator. This only lets sandboxes see
+  each drive's and the Users folder's attributes, never their contents.
+  Node releases older than libuv 1.53 still can't start child programs with
+  pipes in a container; use the compatible tier (below) for Node-based
+  agents that run tools.
+- **Apps built on Chromium**: Electron desktop apps (most AI chat apps),
+  Steam, apps built on Microsoft WebView2 such as Tauri apps, and browsers.
+  Chromium needs named pipes that Windows only lets a container create
+  under a private prefix Chromium doesn't use, so these apps can't run in a
+  container. Install them into a box with the **compatible** profile
+  (`isolated box install --profile compatible --box "AI apps" -- Setup.exe`).
+  Files they write still land in the box, so nothing is scattered around
+  your PC, but they can read your files and the network can't be blocked.
+  Like Sandboxie, Isolated recognises Chromium-based apps by the files next
+  to their exe and turns off their own inner sandbox, which can't start
+  there (`--no-sandbox`, `-no-cef-sandbox` for Steam, and
+  `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS` for WebView2 apps).
+- Games whose anti-cheat installs a kernel driver can't run in any sandbox.
+
 **Choosing folders.** **Run in Isolated with folders...** opens a small
 window before the app starts: add the folders it may see (or drop them on
 the window), and tick **Can change files** for the ones it may save into.
@@ -185,6 +215,7 @@ isolated container shell "AI apps"
 isolated container net "AI apps" off
 isolated ps
 isolated kill <id>
+isolated system-compat
 isolated update
 ```
 
