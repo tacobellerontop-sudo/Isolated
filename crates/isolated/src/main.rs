@@ -65,7 +65,7 @@ Usage:
   isolated system-compat                As administrator, once: let Node, Electron and
                                         similar apps start in a sandbox
   isolated sandbox-user setup|remove|status
-                                        Run "Works with more apps" containers as a hidden
+                                        Run 'Works with more apps' containers as a hidden
                                         Windows user that can't read your files (asks
                                         for administrator rights once)
   isolated --version
