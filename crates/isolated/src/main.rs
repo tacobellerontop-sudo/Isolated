@@ -783,6 +783,11 @@ fn box_launch(
     label: &str,
     out: &Out,
 ) -> Result<ExitCode, String> {
+    let mut owned = b.clone();
+    if owned.add_known_kept(&target.to_string_lossy()) {
+        let _ = owned.save(dirs);
+    }
+    let b = &owned;
     let mut policy = box_policy(store, b)?;
     if policy.filesystem.ask_for_folders && !choose_folders(dirs, &target, &mut policy)? {
         return Ok(ExitCode::from(1));
@@ -801,8 +806,14 @@ fn box_launch(
         raw_tail: String::new(),
         workdir,
     };
-    for note in isolated_windows::boxes::keep_folders(&policy, b) {
+    let notes = isolated_windows::boxes::keep_folders(&policy, b);
+    for note in &notes {
         out.info(&format!("Note: {note}"));
+    }
+    if !notes.is_empty() && !out.console {
+        // Started from the menu or a shortcut: there is no console to read.
+        let text = notes.join("\n\n");
+        std::thread::spawn(move || shell::message_box("Isolated", &text, Icon::Warning));
     }
     let sandbox = isolated_windows::launch(dirs, &policy, &req)?;
     out.info(&format!(
@@ -1265,6 +1276,15 @@ fn box_install(mut parser: lexopt::Parser, dirs: &Dirs, store: &ProfileStore, ou
     let args_given = args.clone();
     pre.extend(args);
 
+    // Installers often start the app at the end; keep the folders it is
+    // known to insist on inside the box from the start.
+    if b.add_known_kept(&target_s) {
+        let _ = b.save(dirs);
+    }
+    for note in isolated_windows::boxes::keep_folders(&policy, &b) {
+        out.info(&format!("Note: {note}"));
+    }
+
     let req = LaunchRequest {
         profile_name: policy.name.clone(),
         target: target.clone(),
@@ -1286,6 +1306,9 @@ fn box_install(mut parser: lexopt::Parser, dirs: &Dirs, store: &ProfileStore, ou
     ));
     let code = sandbox.wait()?;
     let captured = catcher.finish();
+    if !isolated_windows::boxes::in_use(dirs, &b.name) {
+        isolated_windows::boxes::release_folders(&b);
+    }
 
     let (shortcuts, exes) = isolated_windows::boxes::found_since(&folder, &before, alias.as_ref());
     drop(alias);
