@@ -131,6 +131,80 @@ pub mod boxes {
         }
     }
 
+    fn same_path(a: &Path, b: &Path) -> bool {
+        let n = |p: &Path| {
+            let s = p.to_string_lossy().to_ascii_lowercase();
+            s.strip_prefix(r"\\?\").unwrap_or(&s).trim_end_matches('\\').to_string()
+        };
+        n(a) == n(b)
+    }
+
+    /// True if `real` is a link into this box's copy.
+    fn is_kept_link(real: &Path, copy: &Path) -> bool {
+        std::fs::read_link(real).is_ok_and(|t| same_path(&t, copy))
+    }
+
+    /// Links each of the box's kept folders to the box's own copy, so apps
+    /// that insist on a folder outside the box write into the box. A folder
+    /// that already holds files on the PC is left alone. Returns a note for
+    /// each folder that couldn't be kept.
+    pub fn keep_folders(policy: &Policy, b: &isolated_core::boxes::AppBox) -> Vec<String> {
+        let mut notes = Vec::new();
+        if b.kept_folders.is_empty() {
+            return notes;
+        }
+        let base = match folder(policy, &b.name) {
+            Ok(f) => f,
+            Err(e) => return vec![e],
+        };
+        for k in &b.kept_folders {
+            let real = PathBuf::from(isolated_core::boxes::expand_env(k));
+            let copy = isolated_core::boxes::kept_copy(&base, &real.to_string_lossy());
+            if let Err(e) = std::fs::create_dir_all(&copy) {
+                notes.push(format!("{}: {e}", copy.display()));
+                continue;
+            }
+            if is_kept_link(&real, &copy) {
+                continue;
+            }
+            if real.exists() {
+                let empty = std::fs::read_dir(&real)
+                    .map(|mut d| d.next().is_none())
+                    .unwrap_or(false);
+                if !(empty && real.is_dir() && std::fs::remove_dir(&real).is_ok()) {
+                    notes.push(format!(
+                        "{} already exists on your PC with files in it, so it was left alone. Move or delete it to keep it in the container.",
+                        real.display()
+                    ));
+                    continue;
+                }
+            }
+            if real.parent().is_none_or(|p| !p.is_dir()) {
+                notes.push(format!("{}: its parent folder doesn't exist", real.display()));
+                continue;
+            }
+            #[cfg(windows)]
+            if let Err(e) = crate::win::junction::create(&real, &copy) {
+                notes.push(e);
+            }
+        }
+        notes
+    }
+
+    /// Removes the links [`keep_folders`] made; the box keeps its copies.
+    pub fn release_folders(b: &isolated_core::boxes::AppBox) {
+        let marker = format!("\\{}\\", container_name(&b.name).to_ascii_lowercase());
+        for k in &b.kept_folders {
+            let real = PathBuf::from(isolated_core::boxes::expand_env(k));
+            if let Ok(t) = std::fs::read_link(&real) {
+                let t = t.to_string_lossy().to_ascii_lowercase();
+                if t.contains(&marker) && t.contains("\\kept\\") {
+                    let _ = std::fs::remove_dir(&real);
+                }
+            }
+        }
+    }
+
     /// The user folder apps in the box see (Documents, Downloads, Desktop
     /// and their settings), created if needed. This is where their
     /// creations usually are.
@@ -205,6 +279,9 @@ pub mod boxes {
     pub fn remove(dirs: &isolated_core::Dirs, box_name: &str) -> Result<()> {
         if in_use(dirs, box_name) {
             return Err(format!("Box '{box_name}' is in use. Stop its apps first."));
+        }
+        if let Some(b) = isolated_core::boxes::AppBox::load(dirs, box_name) {
+            release_folders(&b);
         }
         delete(box_name)?;
         isolated_core::boxes::AppBox::remove(dirs, box_name);

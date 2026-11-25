@@ -623,6 +623,34 @@ Get-Process notepad -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAc
 $watcher.WaitForExit(10000) | Out-Null
 if (-not $watcher.HasExited) { $watcher.Kill() }
 
+# 22. A folder on the PC that an app insists on (like Kryoto's
+#     C:\Users\<you>\Kryoto Games) is kept inside the container, in both tiers.
+foreach ($prof in @("compatible", "online")) {
+    $kb = "SmokeKeep-$prof"
+    $real = Join-Path $env:USERPROFILE "Iso Keep $prof"
+    Run-Sandboxed @("box", "create", $kb, "--profile", $prof) | Out-Null
+    # Called directly so the path with spaces stays one argument.
+    & $Exe box keep $kb $real 2>&1 | ForEach-Object { Write-Host "    keep: $_" }
+    # cmd joins its arguments back into one line, so the redirect target is
+    # its own argument (Windows quotes it because of the space) rather than
+    # a quoted string inside another argument, which cmd can't read.
+    $code = Run-Timed @("box", "run", "--accept-weaker", $kb, "$env:SystemRoot\System32\cmd.exe", "/d", "/c", "echo", "kept>", "$real\saved.txt") 60
+    $copy = Get-ChildItem -Path (Join-Path $env:LOCALAPPDATA "Packages"), (Join-Path $env:USERPROFILE "AppData\LocalLow\Isolated") -Recurse -Filter "saved.txt" -ErrorAction SilentlyContinue | Where-Object { $_.FullName -match "\\Kept\\" -and $_.FullName -match "Iso Keep $prof" } | Select-Object -First 1
+    Write-Host "Kept folder ($prof): exit $code, copy $($copy.FullName), left on PC: $(Test-Path $real)"
+    Check "a kept folder's writes land in the container ($prof)" ($null -ne $copy)
+    Check "nothing is left on the PC after the app closes ($prof)" (-not (Test-Path $real))
+    Run-Sandboxed @("box", "delete", $kb) | Out-Null
+}
+
+# 21. No program started by the tests above was flagged as leaving its
+#     sandbox (the warning is meant for approved administrator prompts).
+$escLog = Join-Path $env:LOCALAPPDATA "Isolated\escapes.log"
+if (Test-Path $escLog) {
+    Get-Content $escLog | ForEach-Object { Write-Host "    $_" }
+    Get-CimInstance Win32_Process -Filter "Name='msedge.exe'" | ForEach-Object { Write-Host "    alive $($_.ProcessId) parent $($_.ParentProcessId): $($_.CommandLine)" }
+}
+Check "no false warnings about programs leaving a sandbox" (-not (Test-Path $escLog))
+
 # 8. Right-click menu registers and unregisters.
 & $Exe register | Out-Null
 Start-Sleep -Milliseconds 500

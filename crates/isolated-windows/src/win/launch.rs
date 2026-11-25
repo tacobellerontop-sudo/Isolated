@@ -490,11 +490,12 @@ fn build_env(
         }
     }
     set("ISOLATED_SANDBOX", "1".into(), &mut env);
-    if installer {
-        // Start installers that ask for administrator rights without them;
-        // most then install for the current user only.
-        set("__COMPAT_LAYER", "RunAsInvoker".into(), &mut env);
-    }
+    // Start programs that ask for administrator rights without them instead
+    // of showing an administrator prompt: what users approve there would run
+    // outside the sandbox. Most installers then install for the current
+    // user only. (Sandboxie gets the same effect by hiding installer
+    // detection.)
+    set("__COMPAT_LAYER", "RunAsInvoker".into(), &mut env);
     for (k, v) in &policy.env.set {
         set(k, v.clone(), &mut env);
     }
@@ -600,6 +601,8 @@ pub struct Running {
     process: OwnedHandle,
     dirs: Dirs,
     journal: Option<JournalEntry>,
+    /// The program's file name, for messages.
+    label: String,
     marker: Option<Marker>,
 }
 
@@ -612,7 +615,13 @@ impl Running {
     }
 
     pub fn wait(self) -> Result<u32> {
+        let escapes = super::escape::Watch::start(
+            self.job.handle.raw(),
+            self.label.clone(),
+            self.dirs.data.join("escapes.log"),
+        );
         self.job.wait_empty();
+        escapes.stop();
         if let Some(m) = self.marker {
             m.stop();
         }
@@ -777,10 +786,8 @@ pub fn launch(dirs: &Dirs, policy: &Policy, req: &LaunchRequest) -> Result<Runni
         req.installer,
         box_env.as_ref(),
     );
-    if req.installer {
-        // Also set here: some Windows versions read it from the caller.
-        std::env::set_var("__COMPAT_LAYER", "RunAsInvoker");
-    }
+    // Also set here: some Windows versions read it from the caller.
+    std::env::set_var("__COMPAT_LAYER", "RunAsInvoker");
 
     let job = Job::create(&job_name, policy).map_err(cleanup_on_error)?;
 
@@ -908,6 +915,7 @@ pub fn launch(dirs: &Dirs, policy: &Policy, req: &LaunchRequest) -> Result<Runni
         process,
         dirs: dirs.clone(),
         journal,
+        label: file_name_of(&prepared.program),
         marker,
     })
 }

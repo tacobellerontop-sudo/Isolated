@@ -58,6 +58,9 @@ Usage:
   isolated uninstall [--remove-data]    Uninstall
   isolated register | unregister        Add or remove the right-click menu only
   isolated update [--check]             Update to the latest release
+  isolated box keep <box> <folder>      Keep a folder an app insists on (such as
+                                        C:\\Users\\you\\Kryoto Games) inside the box
+                                        (--remove to stop; no folder lists them)
   isolated repair                       Remove folder access left by interrupted sandboxes
   isolated system-compat                As administrator, once: let Node, Electron and
                                         similar apps start in a sandbox
@@ -798,14 +801,21 @@ fn box_launch(
         raw_tail: String::new(),
         workdir,
     };
+    for note in isolated_windows::boxes::keep_folders(&policy, b) {
+        out.info(&format!("Note: {note}"));
+    }
     let sandbox = isolated_windows::launch(dirs, &policy, &req)?;
     out.info(&format!(
         "Started {label} from box {} in sandbox {}.",
         b.name,
         sandbox.id()
     ));
-    let code = sandbox.wait()?;
-    Ok(ExitCode::from(code.min(255) as u8))
+    let code = sandbox.wait();
+    // Leave nothing on the PC once the box's last app has closed.
+    if !isolated_windows::boxes::in_use(dirs, &b.name) {
+        isolated_windows::boxes::release_folders(b);
+    }
+    Ok(ExitCode::from(code?.min(255) as u8))
 }
 
 fn load_box(dirs: &Dirs, name: &str) -> Result<AppBox, String> {
@@ -1023,6 +1033,49 @@ fn app_box(mut parser: lexopt::Parser, dirs: &Dirs, out: &Out) -> Result<ExitCod
             let b = load_box(dirs, &box_name)?;
             isolated_windows::boxes::remove(dirs, &b.name)?;
             out.info(&format!("Deleted box {}.", b.name));
+            Ok(ExitCode::SUCCESS)
+        }
+        "keep" => {
+            // isolated box keep <box> [--remove] [<folder>]
+            let mut remove = false;
+            let mut values: Vec<String> = Vec::new();
+            while let Some(arg) = parser.next().map_err(|e| e.to_string())? {
+                match arg {
+                    Long("remove") => remove = true,
+                    Value(v) => values.push(os_string(v)?),
+                    other => return Err(format!("{}. Try 'isolated --help'.", other.unexpected())),
+                }
+            }
+            let box_name = values.first().ok_or("expected a box name")?;
+            let mut b = load_box(dirs, box_name)?;
+            let Some(folder) = values.get(1) else {
+                if b.kept_folders.is_empty() {
+                    out.info(&format!("Box {} keeps no folders from your PC.", b.name));
+                }
+                for k in &b.kept_folders {
+                    out.info(k);
+                }
+                return Ok(ExitCode::SUCCESS);
+            };
+            let stored = isolated_core::boxes::store_kept_path(folder);
+            if remove {
+                isolated_windows::boxes::release_folders(&b);
+                b.kept_folders.retain(|k| !k.eq_ignore_ascii_case(&stored));
+                b.save(dirs)?;
+                out.info(&format!(
+                    "Box {} no longer keeps {stored}. Its copy stays in the box.",
+                    b.name
+                ));
+            } else {
+                if !b.kept_folders.iter().any(|k| k.eq_ignore_ascii_case(&stored)) {
+                    b.kept_folders.push(stored.clone());
+                }
+                b.save(dirs)?;
+                out.info(&format!(
+                    "Box {} now keeps {stored}: apps in it that write there write into the box.",
+                    b.name
+                ));
+            }
             Ok(ExitCode::SUCCESS)
         }
         other => Err(format!("unknown box command '{other}'")),
