@@ -584,7 +584,15 @@ impl App {
         self.install = Some(InstallForm {
             installer: installer.to_string(),
             box_name,
-            profile: if self.store.load("online").is_ok() {
+            profile: if isolated_core::apps::installer_looks_web(
+                &Path::new(installer)
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_default(),
+            ) && self.store.load("compatible").is_ok()
+            {
+                "compatible".to_string()
+            } else if self.store.load("online").is_ok() {
                 "online".to_string()
             } else {
                 self.settings.default_profile.clone()
@@ -611,7 +619,7 @@ impl App {
             return;
         }
         let mut args: Vec<String> = vec!["box".into(), "install".into(), "--box".into(), box_name.clone()];
-        if !AppBox::exists(&self.dirs, &box_name) {
+        if AppBox::load(&self.dirs, &box_name).is_none_or(|b| b.apps.is_empty()) {
             args.push("--profile".into());
             args.push(f.profile.clone());
         }
@@ -1272,6 +1280,12 @@ impl App {
         let mut names: Vec<String> = self.builtin.iter().map(|e| e.policy.name.clone()).collect();
         names.extend(self.user.iter().map(|e| e.policy.name.clone()));
         let box_names: Vec<String> = self.boxes.iter().map(|b| b.name.clone()).collect();
+        let boxes_with_apps: Vec<String> = self
+            .boxes
+            .iter()
+            .filter(|b| !b.apps.is_empty())
+            .map(|b| b.name.clone())
+            .collect();
         let mut go = false;
         let mut cancel = false;
         let f = self.install.as_mut().unwrap();
@@ -1309,7 +1323,8 @@ impl App {
                         }
                     });
                     ui.end_row();
-                    let existing = box_names.iter().any(|n| n.eq_ignore_ascii_case(f.box_name.trim()));
+                    // A container with apps keeps its setting; an empty one can still change it.
+                    let existing = boxes_with_apps.iter().any(|n| n.eq_ignore_ascii_case(f.box_name.trim()));
                     ui.label("Protection");
                     if existing {
                         ui.label(weak(ui, "Uses the container's own setting"));

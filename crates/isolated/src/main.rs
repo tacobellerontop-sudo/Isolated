@@ -1078,11 +1078,24 @@ fn box_install(mut parser: lexopt::Parser, dirs: &Dirs, store: &ProfileStore, ou
     };
     isolated_core::boxes::check_name(&box_name)?;
     let was_new = AppBox::load(dirs, &box_name).is_none();
+    // A container with no apps yet (for example from a failed install).
+    let was_empty = AppBox::load(dirs, &box_name).is_none_or(|b| b.apps.is_empty());
     let mut b = match AppBox::load(dirs, &box_name) {
         Some(b) => b,
         None => {
             let settings = Settings::load(dirs);
-            let p = profile.clone().unwrap_or(settings.default_profile);
+            let web = isolated_core::apps::installer_looks_web(
+                &target
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_default(),
+            );
+            let fallback = if web {
+                "compatible".to_string()
+            } else {
+                settings.default_profile
+            };
+            let p = profile.clone().unwrap_or(fallback);
             let p = if store.load(&p).is_ok() {
                 p
             } else {
@@ -1237,7 +1250,7 @@ fn box_install(mut parser: lexopt::Parser, dirs: &Dirs, store: &ProfileStore, ou
     // their installers (Tauri's) quit at once there. Offer the compatible
     // tier, where they work and still write only into the box.
     let failed = added == 0 && b.apps.is_empty() && captured.is_empty();
-    if policy.tier == Tier::Isolated && was_new && (failed || web_app) && store.load("compatible").is_ok() {
+    if policy.tier == Tier::Isolated && was_empty && (failed || web_app) && store.load("compatible").is_ok() {
         let what = target
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
@@ -1257,7 +1270,9 @@ fn box_install(mut parser: lexopt::Parser, dirs: &Dirs, store: &ProfileStore, ou
             shell::confirm("Isolated", &ask)
         };
         if retry {
-            isolated_windows::boxes::remove(dirs, &b.name)?;
+            if was_new {
+                isolated_windows::boxes::remove(dirs, &b.name)?;
+            }
             let mut again: Vec<std::ffi::OsString> = ["--profile", "compatible", "--accept-weaker", "--box"]
                 .iter()
                 .map(|a| a.into())

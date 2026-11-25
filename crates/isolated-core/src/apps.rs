@@ -81,8 +81,40 @@ pub fn own_sandbox_off_args(exe: &Path) -> Vec<String> {
     }
 }
 
+/// True if an installer's file name follows the naming of Tauri
+/// (`App_1.2.3_x64-setup.exe`) or electron-builder (`App Setup 1.2.3.exe`)
+/// installers, whose apps need the compatible tier.
+pub fn installer_looks_web(file_name: &str) -> bool {
+    let n = file_name.to_ascii_lowercase();
+    let version = |v: &str| !v.is_empty() && v.contains('.') && v.chars().all(|c| c.is_ascii_digit() || c == '.');
+    for arch in ["_x64-setup.exe", "_x86-setup.exe", "_arm64-setup.exe"] {
+        if let Some(rest) = n.strip_suffix(arch) {
+            if let Some((_, v)) = rest.rsplit_once('_') {
+                return version(v);
+            }
+        }
+    }
+    if let Some(rest) = n.strip_suffix(".exe") {
+        if let Some((_, v)) = rest.rsplit_once(" setup ") {
+            return version(v);
+        }
+    }
+    false
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn web_installer_names() {
+        use super::installer_looks_web as w;
+        assert!(w("Kryoto-Desktop_0.4.0_x64-setup.exe"));
+        assert!(w("pot_3.0.7_x64-setup.exe"));
+        assert!(w("Some App Setup 1.2.3.exe"));
+        assert!(!w("7z2408-x64.exe"));
+        assert!(!w("setup.exe"));
+        assert!(!w("npp.8.6.Installer.x64.exe"));
+    }
+
     use super::*;
 
     #[test]
