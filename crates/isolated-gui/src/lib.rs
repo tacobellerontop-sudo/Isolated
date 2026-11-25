@@ -2092,9 +2092,18 @@ impl App {
                 isolated_windows::sandbox_user::ACCOUNT
             ));
             if ui.button("Turn off").clicked() {
-                match isolated_windows::spawn_self(&["sandbox-user", "remove"]) {
-                    Ok(()) => self.set_status("Approve the administrator prompt to remove the hidden user.", false),
-                    Err(e) => self.set_status(e, true),
+                // Asked from this window, which has the focus, so Windows
+                // shows the administrator prompt in front instead of only
+                // flashing it in the taskbar.
+                let asked = std::env::current_exe()
+                    .is_ok_and(|me| isolated_windows::shell::run_as_admin(&me, "sandbox-user remove"));
+                if asked {
+                    self.set_status("Approve the administrator prompt to remove the hidden user.", false);
+                } else {
+                    self.set_status(
+                        "Windows didn't show the administrator prompt, or it was cancelled.",
+                        true,
+                    );
                 }
                 self.sandbox_user = None;
             }
@@ -2105,9 +2114,18 @@ impl App {
                  of your user folder and settings. Locked-down containers don't need it.",
             );
             if ui.button("Turn on (asks for administrator rights once)").clicked() {
-                match isolated_windows::spawn_self(&["sandbox-user", "setup"]) {
-                    Ok(()) => self.set_status("Approve the administrator prompt to create the hidden user.", false),
-                    Err(e) => self.set_status(e, true),
+                // Asked from this window, which has the focus, so Windows
+                // shows the administrator prompt in front instead of only
+                // flashing it in the taskbar.
+                let asked = std::env::current_exe()
+                    .is_ok_and(|me| isolated_windows::shell::run_as_admin(&me, "sandbox-user setup"));
+                if asked {
+                    self.set_status("Approve the administrator prompt to create the hidden user.", false);
+                } else {
+                    self.set_status(
+                        "Windows didn't show the administrator prompt, or it was cancelled.",
+                        true,
+                    );
                 }
                 self.sandbox_user = None;
             }
