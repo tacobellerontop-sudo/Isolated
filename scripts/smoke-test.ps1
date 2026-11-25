@@ -623,6 +623,21 @@ Get-Process notepad -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAc
 $watcher.WaitForExit(10000) | Out-Null
 if (-not $watcher.HasExited) { $watcher.Kill() }
 
+# 22. A folder on the PC that an app insists on (like Kryoto's
+#     C:\Users\<you>\Kryoto Games) is kept inside the container, in both tiers.
+foreach ($prof in @("compatible", "online")) {
+    $kb = "SmokeKeep-$prof"
+    $real = Join-Path $env:USERPROFILE "Iso Keep $prof"
+    Run-Sandboxed @("box", "create", $kb, "--profile", $prof) | Out-Null
+    Run-Sandboxed @("box", "keep", $kb, $real) | Out-Null
+    $code = Run-Timed @("box", "run", "--accept-weaker", $kb, "$env:SystemRoot\System32\cmd.exe", "/d", "/c", "echo kept> `"$real\saved.txt`"") 60
+    $copy = Get-ChildItem -Path (Join-Path $env:LOCALAPPDATA "Packages"), (Join-Path $env:USERPROFILE "AppData\LocalLow\Isolated") -Recurse -Filter "saved.txt" -ErrorAction SilentlyContinue | Where-Object { $_.FullName -match "\\Kept\\" -and $_.FullName -match "Iso Keep $prof" } | Select-Object -First 1
+    Write-Host "Kept folder ($prof): exit $code, copy $($copy.FullName), left on PC: $(Test-Path $real)"
+    Check "a kept folder's writes land in the container ($prof)" ($null -ne $copy)
+    Check "nothing is left on the PC after the app closes ($prof)" (-not (Test-Path $real))
+    Run-Sandboxed @("box", "delete", $kb) | Out-Null
+}
+
 # 21. No program started by the tests above was flagged as leaving its
 #     sandbox (the warning is meant for approved administrator prompts).
 $escLog = Join-Path $env:LOCALAPPDATA "Isolated\escapes.log"

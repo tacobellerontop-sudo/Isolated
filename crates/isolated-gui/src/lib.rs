@@ -200,6 +200,8 @@ struct App {
     /// Whether drive roots still block Node and Electron, and when that was
     /// last checked.
     compat: Option<(bool, Instant)>,
+    /// Folder typed in each container's "Keep a folder" field, by box name.
+    keep_input: std::collections::HashMap<String, String>,
 }
 
 impl App {
@@ -235,6 +237,7 @@ impl App {
             focus_folder: None,
             confirm_unisolate: None,
             compat: None,
+            keep_input: Default::default(),
             dirs,
         };
         app.reload_boxes();
@@ -1080,6 +1083,7 @@ impl App {
         let mut open_shell: Option<String> = None;
         let mut set_net: Option<(String, bool)> = None;
         let mut delete: Option<String> = None;
+        let mut keep_change: Option<(String, String, bool)> = None;
         for b in &self.boxes {
             let in_use = running.contains(&isolated_windows::boxes::container_name(&b.name));
             let net = self.box_net.get(&b.name).copied().unwrap_or(false);
@@ -1154,6 +1158,48 @@ impl App {
                         });
                     });
                 }
+                let title = if b.kept_folders.is_empty() {
+                    "Folders from your PC kept in this container".to_string()
+                } else {
+                    format!("Folders from your PC kept in this container ({})", b.kept_folders.len())
+                };
+                egui::CollapsingHeader::new(RichText::new(title).small())
+                    .id_salt(("keep", &b.name))
+                    .show(ui, |ui| {
+                        ui.label(
+                            weak(
+                                ui,
+                                "If an app says it can't write to a folder on your PC (for example C:\\Users\\you\\Kryoto Games), \
+                                 add that folder here. While the container's apps run, that path leads into the container, \
+                                 so what they save there stays in the container.",
+                            )
+                            .small(),
+                        );
+                        for k in &b.kept_folders {
+                            ui.horizontal(|ui| {
+                                ui.label(RichText::new(k).small());
+                                if ui.small_button("Remove").clicked() {
+                                    keep_change = Some((b.name.clone(), k.clone(), false));
+                                }
+                            });
+                        }
+                        ui.horizontal(|ui| {
+                            let text = self.keep_input.entry(b.name.clone()).or_default();
+                            ui.add(
+                                egui::TextEdit::singleline(text)
+                                    .hint_text(r"C:\Users\you\Kryoto Games")
+                                    .desired_width(300.0),
+                            );
+                            if ui.small_button("Browse...").clicked() {
+                                if let Some(p) = shell::pick_folder() {
+                                    *text = p.to_string_lossy().into_owned();
+                                }
+                            }
+                            if ui.small_button("Keep in container").clicked() && !text.trim().is_empty() {
+                                keep_change = Some((b.name.clone(), std::mem::take(text), true));
+                            }
+                        });
+                    });
                 if self.confirm_delete_box.as_deref() == Some(b.name.as_str()) {
                     ui.horizontal_wrapped(|ui| {
                         ui.label(format!(
@@ -1203,6 +1249,28 @@ impl App {
         }
         if let Some((name, on)) = set_net {
             self.set_box_internet(&name, on);
+        }
+        if let Some((name, folder, add)) = keep_change {
+            if let Some(mut b) = AppBox::load(&self.dirs, &name) {
+                let stored = isolated_core::boxes::store_kept_path(&folder);
+                if add {
+                    if !b.kept_folders.iter().any(|k| k.eq_ignore_ascii_case(&stored)) {
+                        b.kept_folders.push(stored.clone());
+                    }
+                } else {
+                    isolated_windows::boxes::release_folders(&b);
+                    b.kept_folders.retain(|k| !k.eq_ignore_ascii_case(&stored));
+                }
+                match b.save(&self.dirs) {
+                    Ok(()) if add => self.set_status(
+                        format!("'{name}' now keeps {stored}. Restart its apps for this to apply."),
+                        false,
+                    ),
+                    Ok(()) => self.set_status(format!("'{name}' no longer keeps {stored}."), false),
+                    Err(e) => self.set_status(e, true),
+                }
+            }
+            self.last_refresh = None;
         }
         if let Some(name) = open_files {
             self.open_box_files(&name);

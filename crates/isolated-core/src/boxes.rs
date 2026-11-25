@@ -25,6 +25,11 @@ pub struct AppBox {
     /// Internet access for apps in the box. `None` follows the profile.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub internet: Option<bool>,
+    /// Folders on the PC (such as `%USERPROFILE%\Kryoto Games`) that apps
+    /// in the box insist on writing to. Each is kept inside the box: the
+    /// real path becomes a link to the box's own copy.
+    #[serde(default, rename = "keep", skip_serializing_if = "Vec::is_empty")]
+    pub kept_folders: Vec<String>,
     /// Programs users can start from the box.
     #[serde(rename = "app")]
     pub apps: Vec<BoxApp>,
@@ -37,9 +42,57 @@ impl Default for AppBox {
             profile: crate::profile::DEFAULT_PROFILE.into(),
             created: now_unix(),
             internet: None,
+            kept_folders: Vec::new(),
             apps: Vec::new(),
         }
     }
+}
+
+/// Expands `%NAME%` environment variables in a kept folder's path.
+pub fn expand_env(path: &str) -> String {
+    let mut out = String::new();
+    let mut rest = path;
+    while let Some(start) = rest.find('%') {
+        let Some(len) = rest[start + 1..].find('%') else { break };
+        let name = &rest[start + 1..start + 1 + len];
+        out.push_str(&rest[..start]);
+        match std::env::var(name) {
+            Ok(v) if !name.is_empty() => out.push_str(&v),
+            _ => out.push_str(&rest[start..start + len + 2]),
+        }
+        rest = &rest[start + len + 2..];
+    }
+    out.push_str(rest);
+    out
+}
+
+/// How a kept folder is saved: paths in the user folder start with
+/// `%USERPROFILE%`, so they follow a renamed account.
+pub fn store_kept_path(path: &str) -> String {
+    let path = path.trim().trim_matches('"').trim_end_matches(['\\', '/']);
+    if let Ok(home) = std::env::var("USERPROFILE") {
+        let home = home.trim_end_matches('\\');
+        if path.len() > home.len()
+            && path[..home.len()].eq_ignore_ascii_case(home)
+            && path[home.len()..].starts_with('\\')
+        {
+            return format!("%USERPROFILE%{}", &path[home.len()..]);
+        }
+    }
+    path.to_string()
+}
+
+/// Where a kept folder lives inside the box: `<base>\Kept\C\Users\...`.
+pub fn kept_copy(base: &std::path::Path, real: &str) -> std::path::PathBuf {
+    let cleaned: String = real.trim_end_matches(['\\', '/']).replace(':', "");
+    let mut p = base.join("Kept");
+    for part in cleaned
+        .split(['\\', '/'])
+        .filter(|s| !s.is_empty() && *s != "." && *s != "..")
+    {
+        p.push(part);
+    }
+    p
 }
 
 /// A program saved in a box.
@@ -652,6 +705,27 @@ mod tests {
         assert_eq!(apps.len(), 1);
         assert_eq!(apps[0].name, "tool");
         assert!(choose_apps(&[], &[]).is_empty());
+    }
+
+    #[test]
+    fn kept_folder_paths() {
+        let base = std::path::Path::new("B");
+        let c = kept_copy(base, r"C:\Users\me\Kryoto Games\");
+        assert_eq!(
+            c,
+            base.join("Kept")
+                .join("C")
+                .join("Users")
+                .join("me")
+                .join("Kryoto Games")
+        );
+        assert_eq!(
+            kept_copy(base, r"C:\x\..\y"),
+            base.join("Kept").join("C").join("x").join("y")
+        );
+        std::env::set_var("ISO_TEST_HOME", r"C:\Users\me");
+        assert_eq!(expand_env(r"%ISO_TEST_HOME%\Games"), r"C:\Users\me\Games");
+        assert_eq!(expand_env("%NOPE_NOT_SET%"), "%NOPE_NOT_SET%");
     }
 
     #[test]
