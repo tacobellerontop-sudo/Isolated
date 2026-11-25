@@ -1191,7 +1191,7 @@ fn box_install(mut parser: lexopt::Parser, dirs: &Dirs, store: &ProfileStore, ou
         let app_dir = isolated_core::boxes::name_from_installer(&target_s);
         let base = alias.as_ref().map(|a| a.root()).unwrap_or_else(|| folder.clone());
         let dir = isolated_windows::boxes::install_dir(&policy, &base, &app_dir);
-        let (p, tail) = isolated_core::boxes::per_user_args(kind, &dir.to_string_lossy(), !args.is_empty());
+        let (p, tail) = isolated_core::boxes::per_user_args(kind, &dir.to_string_lossy(), &args);
         pre = p;
         raw_tail = tail.join(" ");
     }
