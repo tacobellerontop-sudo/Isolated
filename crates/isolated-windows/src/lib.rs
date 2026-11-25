@@ -205,7 +205,10 @@ pub mod boxes {
             let to = copy.join(e.file_name());
             to.exists() && !(is_empty_tree(&e.path()) || is_empty_tree(&to))
         }) {
-            return Err(format!("the container already has {}", clash.file_name().to_string_lossy()));
+            return Err(format!(
+                "the container already has {}",
+                clash.file_name().to_string_lossy()
+            ));
         }
         for e in entries {
             let from = e.path();
@@ -227,8 +230,7 @@ pub mod boxes {
         if std::fs::symlink_metadata(p).is_ok_and(|m| m.file_type().is_symlink()) {
             return false;
         }
-        p.is_dir()
-            && std::fs::read_dir(p).is_ok_and(|d| d.filter_map(|e| e.ok()).all(|e| is_empty_tree(&e.path())))
+        p.is_dir() && std::fs::read_dir(p).is_ok_and(|d| d.filter_map(|e| e.ok()).all(|e| is_empty_tree(&e.path())))
     }
 
     /// Removes the links [`keep_folders`] made; the box keeps its copies.

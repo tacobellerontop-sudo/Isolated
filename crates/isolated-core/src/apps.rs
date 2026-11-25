@@ -120,7 +120,10 @@ pub fn known_kept_folders(text: &str) -> &'static [&'static str] {
 mod tests {
     #[test]
     fn known_folders() {
-        assert_eq!(super::known_kept_folders("C:\\x\\Kryoto Desktop\\kryoto.exe"), &["%USERPROFILE%\\Kryoto Games"]);
+        assert_eq!(
+            super::known_kept_folders("C:\\x\\Kryoto Desktop\\kryoto.exe"),
+            &["%USERPROFILE%\\Kryoto Games"]
+        );
         assert!(super::known_kept_folders("notepad.exe").is_empty());
     }
 
