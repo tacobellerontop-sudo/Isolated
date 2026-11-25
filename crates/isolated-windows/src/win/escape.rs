@@ -125,6 +125,11 @@ fn run(job: HANDLE, label: &str, log: &std::path::Path, stop: &AtomicBool) {
             {
                 continue;
             }
+            // The job list was read before the snapshot, so a child started
+            // in between looks outside; ask Windows about this process.
+            if in_job(pid, job) {
+                continue;
+            }
             warned.insert(pid);
             let detail = describe(pid);
             let text = format!(
@@ -199,5 +204,19 @@ fn describe(pid: u32) -> String {
             }
         }
         format!("{path}, integrity {level}")
+    }
+}
+
+/// True if the process is in the job, or is gone (nothing to warn about).
+fn in_job(pid: u32, job: HANDLE) -> bool {
+    use windows::Win32::System::JobObjects::IsProcessInJob;
+    use windows::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
+    unsafe {
+        let Ok(p) = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) else {
+            return true;
+        };
+        let p = OwnedHandle(p);
+        let mut result = windows::core::BOOL(0);
+        IsProcessInJob(p.raw(), Some(job), &mut result).is_err() || result.as_bool()
     }
 }
