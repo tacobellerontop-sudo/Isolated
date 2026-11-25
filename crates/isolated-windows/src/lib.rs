@@ -104,10 +104,7 @@ pub fn gaps(policy: &Policy) -> Vec<Gap> {
 /// Starts a sandbox.
 pub fn launch(dirs: &isolated_core::Dirs, policy: &Policy, req: &LaunchRequest) -> Result<Sandbox> {
     #[cfg(windows)]
-    {
-        compat::prepare_user();
-        win::launch::launch(dirs, policy, req).map(|inner| Sandbox { inner })
-    }
+    return win::launch::launch(dirs, policy, req).map(|inner| Sandbox { inner });
     #[cfg(not(windows))]
     {
         let _ = (dirs, policy, req);
@@ -541,7 +538,22 @@ pub mod compat {
             out.push(home);
         }
         if let Some(local) = std::env::var_os("LOCALAPPDATA").map(PathBuf::from) {
-            out.push(local.join("Packages"));
+            let packages = local.join("Packages");
+            // Each container's own folder sits above the AC folder its apps
+            // live in, and Windows gives the container no access to it.
+            if let Ok(list) = std::fs::read_dir(&packages) {
+                out.extend(
+                    list.flatten()
+                        .filter(|e| {
+                            e.file_name()
+                                .to_string_lossy()
+                                .to_ascii_lowercase()
+                                .starts_with("isolated.")
+                        })
+                        .map(|e| e.path()),
+                );
+            }
+            out.push(packages);
             out.push(local);
         }
         out.retain(|p| p.is_dir());

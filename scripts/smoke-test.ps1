@@ -491,58 +491,21 @@ open('spawn.txt', 'w').write('\n'.join(res))
 } else {
     Write-Host "SKIP  could not download Electron"
 }
-# What stops Node and Electron, and whether letting sandboxes read the
-# attributes of C:\ and the folders above the user folder fixes it.
-Set-Content -Path "$aiHome\diag.py" -Value @'
-import subprocess, os, sys, traceback
-open('diag-started.txt', 'w').write(repr(sys.argv) + ' cwd=' + os.getcwd())
-def hook(t, v, tb):
-    open('diag-crash.txt', 'w').write(''.join(traceback.format_exception(t, v, tb)))
-sys.excepthook = hook
-node, electron, label = sys.argv[1], sys.argv[2], sys.argv[3]
-out = []
-def run(name, args, env=None):
-    e = dict(os.environ); e.update(env or {})
-    log = 'run-out.txt'
-    try:
-        with open(log, 'wb') as f:
-            try:
-                r = subprocess.run(args, stdout=f, stderr=subprocess.STDOUT, timeout=60, env=e)
-                code = f'{r.returncode:#x}'
-            except subprocess.TimeoutExpired:
-                code = 'timeout'
-        text = open(log, 'rb').read().decode('utf-8', 'replace').splitlines()
-        keep = [l for l in text if l.strip()][-25:]
-        out.append(f'{label} {name}: exit {code}')
-        out.extend('      ' + l[:220] for l in keep)
-    except Exception as ex:
-        out.append(f'{label} {name}: {ex!r}')
-    open('diag-' + label + '.txt', 'w').write('\n'.join(out))
-run('node probe.js', [node, 'probe.js'])
-run('node preserve-symlinks', [node, '--preserve-symlinks', '--preserve-symlinks-main', 'probe.js'])
-if electron:
-    for extra in ([], ['--no-sandbox'], ['--no-sandbox', '--disable-gpu']):
-        run('electron ' + ' '.join(extra), [electron] + extra + ['eapp'], {'ELECTRON_ENABLE_LOGGING': '1'})
-        try:
-            out.append('      result: ' + open(os.path.join(os.environ['USERPROFILE'], 'electron.txt')).read())
-            os.remove(os.path.join(os.environ['USERPROFILE'], 'electron.txt'))
-        except Exception:
-            pass
-open('diag-' + label + '.txt', 'w').write('\n'.join(out))
+# Node needs to see that C:\ and C:\Users are folders; system-compat lets
+# sandboxes read only their attributes (the runner is an administrator).
+if ($node -and (Test-Path $aiHome)) {
+    & $Exe system-compat | Out-Host
+    $acl = (Get-Acl "C:\").Access | Where-Object { "$($_.IdentityReference)" -match "APPLICATION PACKAGE" } | ForEach-Object { "$($_.FileSystemRights) $($_.InheritanceFlags)" }
+    Write-Host "C:\ entries for app packages: $($acl -join '; ')"
+    $code = Run-Timed @("box", "run", "SmokeAI", $node, "probe.js") 120
+    Check "Node runs in a container after system-compat (exit $code)" ("$code" -eq "0")
+    Set-Content -Path "$aiHome\spawn.js" -Value @'
+const fs = require('fs');
+const r = require('child_process').spawnSync(process.execPath, ['-e', 'console.log("child-ok")'], { encoding: 'utf8', timeout: 20000 });
+fs.writeFileSync('node-spawn.txt', String(r.stdout || r.error));
 '@
-$electronExe = ""
-$boxText = (Get-Content (Join-Path $boxesDir "SmokeAI.toml") -Raw -ErrorAction SilentlyContinue)
-$m2 = [regex]::Match("$boxText", 'path = ["'']([^"'']*\\electron\.exe)["'']')
-if ($m2.Success) { $electronExe = $m2.Groups[1].Value -replace '\\\\', '\' }
-if ($node -and $python) {
-    Run-Timed @("box", "run", "SmokeAI", $python, "diag.py", "$aiHome\node.exe", $electronExe, "before") 400 | Out-Null
-    Get-Content "$aiHome\diag-started.txt", "$aiHome\diag-crash.txt", "$aiHome\diag-before.txt" -ErrorAction SilentlyContinue | ForEach-Object { Write-Host "    $_" }
-    Write-Host "Files in the container's user folder: $((Get-ChildItem $aiHome -Name) -join ', ')"
-    $chain = @("C:\", "C:\Users", $env:USERPROFILE, "$env:USERPROFILE\AppData", "$env:LOCALAPPDATA", "$env:LOCALAPPDATA\Packages")
-    foreach ($d in $chain) { icacls $d /grant "*S-1-15-2-1:(RA)" | Out-Null }
-    Run-Timed @("box", "run", "SmokeAI", $python, "diag.py", "$aiHome\node.exe", $electronExe, "after-RA") 420 | Out-Null
-    Get-Content "$aiHome\diag-after-RA.txt" -ErrorAction SilentlyContinue | ForEach-Object { Write-Host "    $_" }
-    foreach ($d in $chain) { icacls $d /remove "*S-1-15-2-1" | Out-Null }
+    $code = Run-Timed @("box", "run", "SmokeAI", $node, "spawn.js") 60
+    Write-Host "INFO  Node child process with pipes in a container: exit $code, $(Get-Content "$aiHome\node-spawn.txt" -ErrorAction SilentlyContinue)"
 }
 # The compatible tier (low integrity, no AppContainer) can create named
 # pipes, which Chromium, Electron and Node's child processes need.
@@ -573,11 +536,11 @@ if ($m.Success) {
     $electron = $m.Groups[1].Value -replace '\\\\', '\'
     foreach ($extra in @("", "--no-sandbox")) {
         Remove-Item "$low\electron.txt" -ErrorAction SilentlyContinue
-        $args2 = @("run", "--compatible", "--accept-weaker", "--no-ask", "--", $electron)
-        if ($extra) { $args2 += $extra }
-        $args2 += @("$aiHome\eapp", "$low\electron.txt")
-        $code = Run-Timed $args2 90
+        Remove-Item "$low\e-log.txt" -ErrorAction SilentlyContinue
+        $line = "$electron $extra --enable-logging=stderr --user-data-dir=$low\ud $aiHome\eapp $low\electron.txt > $low\e-log.txt 2>&1"
+        $code = Run-Timed @("run", "--compatible", "--accept-weaker", "--no-ask", "--", "$env:SystemRoot\System32\cmd.exe", "/d", "/c", $line) 90
         Write-Host "INFO  Electron ($extra) in the compatible tier: exit $code, result: $(Get-Content "$low\electron.txt" -ErrorAction SilentlyContinue)"
+        Get-Content "$low\e-log.txt" -ErrorAction SilentlyContinue | Select-Object -Last 15 | ForEach-Object { Write-Host "    $_" }
     }
 }
 Run-Sandboxed @("box", "delete", "SmokeAI") | Out-Null

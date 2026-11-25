@@ -766,6 +766,10 @@ pub fn launch(dirs: &Dirs, policy: &Policy, req: &LaunchRequest) -> Result<Runni
         .or_else(|| private.as_ref().map(|p| p.temp.clone()))
         .unwrap_or_else(|| PathBuf::from(r"C:\"));
 
+    if container.is_some() {
+        // Node, Electron and others look at every folder above their files.
+        crate::compat::prepare_user();
+    }
     let spawn = || -> Result<(OwnedHandle, u32)> {
         unsafe {
             let mut attrs = AttrList::new(3)?;
