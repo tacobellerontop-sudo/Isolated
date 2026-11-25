@@ -574,6 +574,10 @@ for name, extra in (('plain', []), ('no-sandbox', ['--no-sandbox']), ('user-data
     open(r'$low\erun.txt', 'w').write('\n'.join(out))
 "@
             $code = Run-Timed @("box", "run", "--accept-weaker", "SmokeLow", $python, "$low\erun.py") 200
+            Remove-Item "$low\e-base.txt" -ErrorAction SilentlyContinue
+            $bp = Start-Process -FilePath $le -ArgumentList @("$aiHome\eapp", "$low\e-base.txt") -PassThru -WindowStyle Hidden
+            if (-not $bp.WaitForExit(45000)) { $bp.Kill() }
+            Write-Host "INFO  Electron outside any sandbox: $(Get-Content "$low\e-base.txt" -ErrorAction SilentlyContinue)"
             Write-Host "Electron started by Python in a compatible box (exit $code):"
             Get-Content "$low\erun.txt" -ErrorAction SilentlyContinue | ForEach-Object { Write-Host "    $_" }
         }
