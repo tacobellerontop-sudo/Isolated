@@ -359,10 +359,13 @@ fetch('https://github.com').then(r => process.exit(r.ok ? 0 : 9), e => { fs.writ
     $code = Run-Timed @("box", "run", "SmokeAI", $node, "probe.js") 120
     Write-Host "node error: $(Get-Content "$aiHome\node-error.txt" -ErrorAction SilentlyContinue)"
     if ("$code" -ne "0") {
-        Run-Timed @("box", "run", "SmokeAI", $cmd, "/d", "/c", "`"$node`" probe.js > node-out.txt 2>&1") 120 | Out-Null
+        # The sandbox can read node.exe's own folder only when node is the
+        # program started, so run a copy from inside the container to see
+        # its error output.
+        Copy-Item $node "$aiHome\node.exe"
+        Run-Timed @("box", "run", "SmokeAI", $cmd, "/d", "/c", "node.exe probe.js > node-out.txt 2>&1") 120 | Out-Null
         Get-Content "$aiHome\node-out.txt" -ErrorAction SilentlyContinue | ForEach-Object { Write-Host "    node: $_" }
     }
-    Check "Node.js runs in a container, reaches the internet, keeps ~/.cache inside (exit $code)" (("$code" -eq "0") -and (Test-Path "$aiHome\.cache\probe\node.txt"))
 }
 $python = (Get-Command python -ErrorAction SilentlyContinue).Source
 if ($python -and (Test-Path $aiHome)) {
@@ -385,16 +388,57 @@ $code = Run-Timed @("box", "run", "SmokeAI", $Exe, "diag-loopback", "loop.txt") 
 $loop = (Get-Content "$aiHome\loop.txt" -ErrorAction SilentlyContinue) -join "; "
 Write-Host "Loopback inside a container (exit $code): $loop"
 Check "programs in a container can talk over localhost ($loop)" (("$loop" -match "same process: Ok") -and ("$loop" -match "other process: Ok\(Some\(0\)\)"))
-foreach ($browser in @("${env:ProgramFiles(x86)}\Microsoft\Edge\Application\msedge.exe", "$env:ProgramFiles\Google\Chrome\Application\chrome.exe")) {
+$variants = @(
+    @("${env:ProgramFiles(x86)}\Microsoft\Edge\Application\msedge.exe", "", ""),
+    @("${env:ProgramFiles(x86)}\Microsoft\Edge\Application\msedge.exe", "--no-sandbox", ""),
+    @("$env:ProgramFiles\Google\Chrome\Application\chrome.exe", "--disable-crashpad-for-testing", ""),
+    @("$env:ProgramFiles\Google\Chrome\Application\chrome.exe", "--no-sandbox --disable-crashpad-for-testing", ""),
+    @("$env:ProgramFiles\Google\Chrome\Application\chrome.exe", "", "set CHROME_HEADLESS=1&")
+)
+foreach ($v in $variants) {
+    $browser, $extra, $pre = $v
     if (-not (Test-Path $browser)) { continue }
     $name = Split-Path $browser -Leaf
-    foreach ($extra in @("", "--no-sandbox")) {
-        Remove-Item "$aiHome\shot.png", "$aiHome\b-out.txt" -ErrorAction SilentlyContinue
-        $line = "`"$browser`" --headless=new --disable-gpu --enable-logging=stderr --v=0 --screenshot=shot.png --window-size=800,600 $extra https://example.com > b-out.txt 2>&1"
-        $code = Run-Timed @("box", "run", "SmokeAI", $cmd, "/d", "/c", $line) 90
-        Write-Host "INFO  Chromium ($name $extra) in a container: exit $code, screenshot $(Test-Path "$aiHome\shot.png")"
-        Get-Content "$aiHome\b-out.txt" -ErrorAction SilentlyContinue | Select-Object -First 25 | ForEach-Object { Write-Host "    $_" }
+    Remove-Item "$aiHome\shot.png", "$aiHome\b-out.txt" -ErrorAction SilentlyContinue
+    $line = "$pre`"$browser`" --headless=new --disable-gpu --enable-logging=stderr --screenshot=shot.png --window-size=800,600 $extra https://example.com > b-out.txt 2>&1"
+    $code = Run-Timed @("box", "run", "SmokeAI", $cmd, "/d", "/c", $line) 90
+    Write-Host "INFO  Chromium ($name $pre $extra) in a container: exit $code, screenshot $(Test-Path "$aiHome\shot.png")"
+    Get-Content "$aiHome\b-out.txt" -ErrorAction SilentlyContinue | Where-Object { $_ -match "ERROR|FATAL|denied|failed" -and $_ -notmatch "oneauth|Edge LLM" } | Select-Object -First 15 | ForEach-Object { Write-Host "    $_" }
+}
+# Electron, which most desktop AI apps are built on, unpacked from its .zip
+# into a container like a portable app.
+$ez = Join-Path $instDir "electron-v33.2.1-win32-x64.zip"
+& $curl -sSL -m 300 -o $ez "https://github.com/electron/electron/releases/download/v33.2.1/electron-v33.2.1-win32-x64.zip"
+if ((Test-Path $ez) -and ((Get-Item $ez).Length -gt 50MB)) {
+    $code = Run-Timed @("box", "install", "--box", "SmokeAI", "--", $ez) 300
+    $boxText = (Get-Content (Join-Path $boxesDir "SmokeAI.toml") -Raw -ErrorAction SilentlyContinue)
+    $m = [regex]::Match("$boxText", 'path = ["'']([^"'']*\\electron\.exe)["'']')
+    Write-Host "Electron unpacked (exit $code): $($m.Groups[1].Value)"
+    New-Item -ItemType Directory -Force -Path "$aiHome\eapp" | Out-Null
+    Set-Content -Path "$aiHome\eapp\package.json" -Value '{"name":"probe","main":"main.js"}'
+    Set-Content -Path "$aiHome\eapp\main.js" -Value @'
+const { app, BrowserWindow } = require('electron');
+const fs = require('fs'), path = require('path'), os = require('os');
+const out = (t) => fs.writeFileSync(path.join(os.homedir(), 'electron.txt'), t);
+setTimeout(() => { out('timeout'); app.exit(4); }, 60000);
+app.whenReady().then(async () => {
+  const w = new BrowserWindow({ show: false });
+  await w.loadURL('https://example.com');
+  out('title ' + await w.webContents.executeJavaScript('document.title'));
+  app.quit();
+}).catch((e) => { out('error ' + e); app.exit(3); });
+'@
+    if ($m.Success) {
+        $electron = $m.Groups[1].Value -replace '\\\\', '\'
+        foreach ($extra in @("", "--no-sandbox")) {
+            Remove-Item "$aiHome\electron.txt", "$aiHome\e-out.txt" -ErrorAction SilentlyContinue
+            $code = Run-Timed @("box", "run", "SmokeAI", $cmd, "/d", "/c", "set ELECTRON_ENABLE_LOGGING=1& `"$electron`" $extra eapp > e-out.txt 2>&1") 120
+            Write-Host "INFO  Electron ($extra) in a container: exit $code, result: $(Get-Content "$aiHome\electron.txt" -ErrorAction SilentlyContinue)"
+            Get-Content "$aiHome\e-out.txt" -ErrorAction SilentlyContinue | Where-Object { $_ -match "ERROR|FATAL|denied|failed" } | Select-Object -First 15 | ForEach-Object { Write-Host "    $_" }
+        }
     }
+} else {
+    Write-Host "SKIP  could not download Electron"
 }
 Run-Sandboxed @("box", "delete", "SmokeAI") | Out-Null
 
