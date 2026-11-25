@@ -69,6 +69,24 @@ pub fn open(target: &str) {
     }
 }
 
+/// Starts `exe` as administrator (Windows asks first). False if refused.
+pub fn run_as_admin(exe: &std::path::Path, args: &str) -> bool {
+    let t = Wide::new(exe.as_os_str());
+    let a = Wide::new(args);
+    let verb = Wide::new("runas");
+    let r = unsafe {
+        ShellExecuteW(
+            None,
+            verb.pcwstr(),
+            t.pcwstr(),
+            a.pcwstr(),
+            PCWSTR::null(),
+            SW_SHOWNORMAL,
+        )
+    };
+    r.0 as isize > 32
+}
+
 pub fn pick(folder: bool) -> Option<PathBuf> {
     pick_with(folder, "Programs and scripts", "*.exe;*.lnk;*.bat;*.cmd;*.ps1;*.com")
 }

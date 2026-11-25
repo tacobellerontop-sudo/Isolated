@@ -66,3 +66,15 @@ impl Drop for DriveAlias {
         }
     }
 }
+
+/// The roots of the PC's fixed (non-removable, non-network) drives.
+pub fn fixed_roots() -> Vec<PathBuf> {
+    use windows::Win32::Storage::FileSystem::GetDriveTypeW;
+    const DRIVE_FIXED: u32 = 3;
+    let used = unsafe { GetLogicalDrives() };
+    ('A'..='Z')
+        .filter(|c| used & (1 << (*c as u32 - 'A' as u32)) != 0)
+        .map(|c| PathBuf::from(format!("{c}:\\")))
+        .filter(|p| unsafe { GetDriveTypeW(Wide::new(p.as_os_str()).pcwstr()) } == DRIVE_FIXED)
+        .collect()
+}

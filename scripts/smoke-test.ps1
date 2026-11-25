@@ -511,7 +511,7 @@ def run(name, args, env=None):
             except subprocess.TimeoutExpired:
                 code = 'timeout'
         text = open(log, 'rb').read().decode('utf-8', 'replace').splitlines()
-        keep = [l for l in text if any(k in l for k in ('Error', 'ERROR', 'FATAL', 'EPERM', 'denied', 'title', 'Check failed'))][:12]
+        keep = [l for l in text if l.strip()][-25:]
         out.append(f'{label} {name}: exit {code}')
         out.extend('      ' + l[:220] for l in keep)
     except Exception as ex:
@@ -534,12 +534,12 @@ $boxText = (Get-Content (Join-Path $boxesDir "SmokeAI.toml") -Raw -ErrorAction S
 $m2 = [regex]::Match("$boxText", 'path = ["'']([^"'']*\\electron\.exe)["'']')
 if ($m2.Success) { $electronExe = $m2.Groups[1].Value -replace '\\\\', '\' }
 if ($node -and $python) {
-    Run-Timed @("box", "run", "SmokeAI", $python, "diag.py", $node, $electronExe, "before") 400 | Out-Null
+    Run-Timed @("box", "run", "SmokeAI", $python, "diag.py", "$aiHome\node.exe", $electronExe, "before") 400 | Out-Null
     Get-Content "$aiHome\diag-started.txt", "$aiHome\diag-crash.txt", "$aiHome\diag-before.txt" -ErrorAction SilentlyContinue | ForEach-Object { Write-Host "    $_" }
     Write-Host "Files in the container's user folder: $((Get-ChildItem $aiHome -Name) -join ', ')"
     $chain = @("C:\", "C:\Users", $env:USERPROFILE, "$env:USERPROFILE\AppData", "$env:LOCALAPPDATA", "$env:LOCALAPPDATA\Packages")
     foreach ($d in $chain) { icacls $d /grant "*S-1-15-2-1:(RA)" | Out-Null }
-    Run-Timed @("box", "run", "SmokeAI", $python, "diag.py", $node, $electronExe, "after-RA") 420 | Out-Null
+    Run-Timed @("box", "run", "SmokeAI", $python, "diag.py", "$aiHome\node.exe", $electronExe, "after-RA") 420 | Out-Null
     Get-Content "$aiHome\diag-after-RA.txt" -ErrorAction SilentlyContinue | ForEach-Object { Write-Host "    $_" }
     foreach ($d in $chain) { icacls $d /remove "*S-1-15-2-1" | Out-Null }
 }

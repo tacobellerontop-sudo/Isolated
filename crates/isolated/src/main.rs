@@ -59,6 +59,8 @@ Usage:
   isolated register | unregister        Add or remove the right-click menu only
   isolated update [--check]             Update to the latest release
   isolated repair                       Remove folder access left by interrupted sandboxes
+  isolated system-compat                As administrator, once: let Node, Electron and
+                                        similar apps start in a sandbox
   isolated --version
 
 'container' works everywhere 'box' does: a box is what the window calls a
@@ -317,6 +319,13 @@ fn dispatch(args: Vec<OsString>, out: &Out) -> Result<ExitCode, String> {
                 })
                 .is_ok();
             Ok(if ok { ExitCode::SUCCESS } else { ExitCode::from(3) })
+        }
+        "system-compat" => {
+            let n = isolated_windows::compat::fix_system().map_err(|e| format!("{e}. Run this as administrator."))?;
+            out.info(&format!(
+                "Node, Electron and similar apps can now start in a sandbox ({n} folder(s) updated)."
+            ));
+            Ok(ExitCode::SUCCESS)
         }
         "repair" => {
             let n = isolated_windows::repair(&dirs)?;

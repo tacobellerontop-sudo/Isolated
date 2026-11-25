@@ -104,7 +104,10 @@ pub fn gaps(policy: &Policy) -> Vec<Gap> {
 /// Starts a sandbox.
 pub fn launch(dirs: &isolated_core::Dirs, policy: &Policy, req: &LaunchRequest) -> Result<Sandbox> {
     #[cfg(windows)]
-    return win::launch::launch(dirs, policy, req).map(|inner| Sandbox { inner });
+    {
+        compat::prepare_user();
+        win::launch::launch(dirs, policy, req).map(|inner| Sandbox { inner })
+    }
     #[cfg(not(windows))]
     {
         let _ = (dirs, policy, req);
@@ -522,6 +525,79 @@ pub fn repair(dirs: &isolated_core::Dirs) -> Result<usize> {
     }
 }
 
+/// Lets sandboxed apps read the attributes of the folders above the user
+/// folder (`C:\`, `C:\Users`, ...). Node, Electron and most other runtimes
+/// check every folder above a file when they find its real path, and fail
+/// without this. Only attributes such as "this is a folder" become visible,
+/// never names or contents, and nothing below each folder changes.
+pub mod compat {
+    use std::path::PathBuf;
+
+    /// Folders inside the user's own profile; changed without asking.
+    pub fn user_folders() -> Vec<PathBuf> {
+        let mut out = Vec::new();
+        if let Some(home) = std::env::var_os("USERPROFILE").map(PathBuf::from) {
+            out.push(home.join("AppData"));
+            out.push(home);
+        }
+        if let Some(local) = std::env::var_os("LOCALAPPDATA").map(PathBuf::from) {
+            out.push(local.join("Packages"));
+            out.push(local);
+        }
+        out.retain(|p| p.is_dir());
+        out
+    }
+
+    /// Folders that need an administrator: the drive roots and `C:\Users`.
+    pub fn system_folders() -> Vec<PathBuf> {
+        #[allow(unused_mut)]
+        let mut out: Vec<PathBuf> = Vec::new();
+        if let Some(users) = std::env::var_os("USERPROFILE")
+            .map(PathBuf::from)
+            .and_then(|h| h.parent().map(PathBuf::from))
+        {
+            out.push(users);
+        }
+        #[cfg(windows)]
+        out.extend(crate::win::drive::fixed_roots());
+        out
+    }
+
+    /// Fixes the user's own folders, quietly. Called before each launch.
+    pub fn prepare_user() {
+        #[cfg(windows)]
+        for p in user_folders() {
+            let _ = crate::win::acl::allow_attribute_read(&p, false);
+        }
+    }
+
+    /// True if some drive root or `C:\Users` still blocks Node and Electron.
+    pub fn system_needed() -> bool {
+        #[cfg(windows)]
+        return system_folders()
+            .iter()
+            .any(|p| crate::win::acl::allow_attribute_read(p, true).unwrap_or(false));
+        #[cfg(not(windows))]
+        false
+    }
+
+    /// Fixes the system folders. Needs to run as administrator. Returns how
+    /// many folders were changed.
+    pub fn fix_system() -> crate::Result<usize> {
+        #[allow(unused_mut)]
+        let mut n = 0;
+        #[cfg(windows)]
+        for p in system_folders() {
+            match crate::win::acl::allow_attribute_read(&p, false) {
+                Ok(true) => n += 1,
+                Ok(false) => {}
+                Err(e) => return Err(e),
+            }
+        }
+        Ok(n)
+    }
+}
+
 /// The right-click "Run in Isolated" menu.
 pub mod menu {
     use super::*;
@@ -641,6 +717,18 @@ pub mod shell {
         #[cfg(not(windows))]
         {
             let _ = std::process::Command::new("xdg-open").arg(target).spawn();
+        }
+    }
+
+    /// Starts `exe` as administrator; Windows asks users first. False if
+    /// they said no.
+    pub fn run_as_admin(exe: &std::path::Path, args: &str) -> bool {
+        #[cfg(windows)]
+        return crate::win::shell::run_as_admin(exe, args);
+        #[cfg(not(windows))]
+        {
+            let _ = (exe, args);
+            false
         }
     }
 
