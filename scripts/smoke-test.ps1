@@ -492,7 +492,11 @@ open('spawn.txt', 'w').write('\n'.join(res))
 # What stops Node and Electron, and whether letting sandboxes read the
 # attributes of C:\ and the folders above the user folder fixes it.
 Set-Content -Path "$aiHome\diag.py" -Value @'
-import subprocess, os, sys
+import subprocess, os, sys, traceback
+open('diag-started.txt', 'w').write(repr(sys.argv) + ' cwd=' + os.getcwd())
+def hook(t, v, tb):
+    open('diag-crash.txt', 'w').write(''.join(traceback.format_exception(t, v, tb)))
+sys.excepthook = hook
 node, electron, label = sys.argv[1], sys.argv[2], sys.argv[3]
 out = []
 def run(name, args, env=None):
@@ -529,8 +533,9 @@ $boxText = (Get-Content (Join-Path $boxesDir "SmokeAI.toml") -Raw -ErrorAction S
 $m2 = [regex]::Match("$boxText", 'path = ["'']([^"'']*\\electron\.exe)["'']')
 if ($m2.Success) { $electronExe = $m2.Groups[1].Value -replace '\\\\', '\' }
 if ($node -and $python) {
-    Run-Timed @("box", "run", "SmokeAI", $python, "diag.py", $node, $electronExe, "before") 420 | Out-Null
-    Get-Content "$aiHome\diag-before.txt" -ErrorAction SilentlyContinue | ForEach-Object { Write-Host "    $_" }
+    Run-Timed @("box", "run", "SmokeAI", $python, "diag.py", $node, $electronExe, "before") 400 | Out-Null
+    Get-Content "$aiHome\diag-started.txt", "$aiHome\diag-crash.txt", "$aiHome\diag-before.txt" -ErrorAction SilentlyContinue | ForEach-Object { Write-Host "    $_" }
+    Write-Host "Files in the container's user folder: $((Get-ChildItem $aiHome -Name) -join ', ')"
     $chain = @("C:\", "C:\Users", $env:USERPROFILE, "$env:USERPROFILE\AppData", "$env:LOCALAPPDATA", "$env:LOCALAPPDATA\Packages")
     foreach ($d in $chain) { icacls $d /grant "*S-1-15-2-1:(RA)" | Out-Null }
     Run-Timed @("box", "run", "SmokeAI", $python, "diag.py", $node, $electronExe, "after-RA") 420 | Out-Null
