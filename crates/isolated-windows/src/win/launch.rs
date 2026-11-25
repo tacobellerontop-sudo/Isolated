@@ -642,6 +642,17 @@ pub fn launch(dirs: &Dirs, policy: &Policy, req: &LaunchRequest) -> Result<Runni
     }
 
     let mut prepared = prepare(&req.target, &req.args, 0, req.installer)?;
+    if policy.tier == Tier::Isolated
+        && !req.installer
+        && isolated_core::apps::engine(&prepared.program) != isolated_core::apps::Engine::Other
+    {
+        return Err(format!(
+            "{} is built on Chromium (like Electron apps, Steam and web browsers), which can't start in a full \
+             container: Windows doesn't let it create the pipes it needs there. Use the compatible profile instead. \
+             For an installed app, install it again into a box with the compatible profile; its files still stay in the box.",
+            file_name_of(&prepared.program)
+        ));
+    }
     if policy.tier == Tier::Compatible && !req.installer && prepared.application.as_ref() == Some(&prepared.program) {
         // Chromium's own sandbox can't start under a low-integrity token.
         let mut args = isolated_core::apps::own_sandbox_off_args(&prepared.program);
